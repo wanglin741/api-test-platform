@@ -1,0 +1,39 @@
+# ==========================
+# Python / uv (后端)
+# ==========================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# ==========================
+# Node.js / Vue (前端)
+# ==========================
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==========================
+# 系统/编辑器杂项
+# ==========================
+.DS_Store
+Thumbs.db
