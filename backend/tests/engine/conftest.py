@@ -1,10 +1,9 @@
-"""引擎测试的公共夹具:MockTransport 工厂与内存 Sink。"""
+"""引擎测试的公共夹具:MockTransport 工厂(sink 夹具见 tests/conftest.py)。"""
 
 import json
 from typing import Any, Callable
 
 import httpx
-import pytest
 
 from app.engine.context import EngineContext
 from app.engine.defaults import InMemorySink
@@ -49,8 +48,3 @@ def captured_body(request: httpx.Request) -> Any:
     if "json" in content_type:
         return json.loads(raw)
     return raw.decode("utf-8", errors="replace")
-
-
-@pytest.fixture
-def sink() -> InMemorySink:
-    return InMemorySink()

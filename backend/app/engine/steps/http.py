@@ -148,11 +148,21 @@ async def run_http_step(
 
         start = time.perf_counter()
         try:
-            response = await client.request(
+            async with client.stream(
                 step.request.method, url, headers=headers, params=params,
                 follow_redirects=step.request.follow_redirects,
                 timeout=timeout, **kwargs,
-            )
+            ) as response:
+                # 流式读取:累计到 body_max_bytes 即停止并关闭连接(§11 硬要求,
+                # 先整读进内存再判断会让超大响应 OOM worker)
+                body_bytes = bytearray()
+                truncated = False
+                async for chunk in response.aiter_bytes():
+                    if len(body_bytes) + len(chunk) > context.body_max_bytes:
+                        body_bytes += chunk[: context.body_max_bytes - len(body_bytes)]
+                        truncated = True
+                        break
+                    body_bytes += chunk
         except httpx.TransportError as exc:
             result.status = "error"
             result.error_message = f"{type(exc).__name__}: {exc}"
@@ -177,7 +187,8 @@ async def run_http_step(
     result.response = ResponseSnapshot(
         status_code=response.status_code,
         headers=dict(response.headers.items()),
-        body=response.text,
+        body=bytes(body_bytes).decode("utf-8", errors="replace"),
+        truncated=truncated,
     )
     result.request.body = snapshot_body
 
