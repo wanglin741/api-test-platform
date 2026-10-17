@@ -17,7 +17,10 @@
     "gen:api": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/api/schema.d.ts"
   },
   "dependencies": {
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lint": "^6.9.7",
     "@element-plus/icons-vue": "^2.3.2",
+    "codemirror": "^6.0.2",
     "element-plus": "^2.14.7",
     "openapi-fetch": "^0.17.0",
     "pinia": "^4.0.3",
