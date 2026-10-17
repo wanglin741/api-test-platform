@@ -53,7 +53,18 @@ async function submit() {
     const payload: CaseCreate = {
       name: form.name.trim(),
       priority: form.priority as CaseCreate['priority'],
-      dsl: { dsl_version: 1, steps: [] },
+      // 后端要求 steps 至少 1 步;给可执行的占位步骤,进入详情页后由编辑器改写
+      dsl: {
+        dsl_version: 1,
+        steps: [
+          {
+            id: 'step-1',
+            name: '示例步骤',
+            type: 'http',
+            request: { method: 'GET', url: 'https://httpbin.org/get' },
+          },
+        ],
+      },
     }
     const created = await caseStore.create(currentId.value, payload)
     dialogVisible.value = false

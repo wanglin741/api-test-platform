@@ -24,7 +24,7 @@ from app.core.config import get_settings
 from app.db.session import make_sync_engine, make_sync_session_factory
 from app.engine import EngineContext, execute as engine_execute
 from app.engine.dsl import parse_dsl
-from app.engine.results import StepResult
+from app.engine.results import StepResult, response_size
 from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
 from app.tasks.celery_app import celery_app
 
@@ -49,16 +49,6 @@ class RedisCancellationToken:
             self._cached = bool(self._client.exists(self._key))
             self._cache_until = now + self._cache_ttl
         return self._cached
-
-
-def _response_size(response) -> int | None:
-    """真实响应大小:优先 Content-Length(截断时读取的字节数只是下界)。"""
-    if response is None or response.body is None:
-        return None
-    declared = response.headers.get("content-length") if response.headers else None
-    if declared is not None and str(declared).isdigit():
-        return int(declared)
-    return len(response.body.encode("utf-8"))
 
 
 class DbSink:
@@ -96,7 +86,7 @@ class DbSink:
             request_body=request.body if request else None,
             response_status=response.status_code if response else None,
             response_headers=response.headers if response else None,
-            response_size=_response_size(response),
+            response_size=response_size(response),
             response_body=body_bytes,
             # >64KB 转对象存储(MVP 不接 MinIO),object_key 始终为空
             response_body_object_key=None,

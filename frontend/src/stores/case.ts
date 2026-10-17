@@ -10,6 +10,7 @@ type CaseOut = components['schemas']['CaseOut']
 type CaseDetail = components['schemas']['CaseDetail']
 type CaseCreate = components['schemas']['CaseCreate']
 type CaseUpdate = components['schemas']['CaseUpdate']
+type StepDebugOut = components['schemas']['StepDebugOut']
 
 const PAGE_SIZE = 20
 
@@ -60,5 +61,21 @@ export const useCaseStore = defineStore('case', () => {
     return data ?? null
   }
 
-  return { items, total, page, load, loadOne, create, save }
+  /** 单步调试:同步端点,一次请求一次返回(不走执行/报告链路)。 */
+  async function debugStep(
+    caseId: number,
+    stepId: string,
+    environmentId: number,
+    client: ApiClient = api,
+  ): Promise<StepDebugOut | null> {
+    const { data } = await client.POST('/api/v1/cases/{case_id}/steps/{step_id}/debug', {
+      params: {
+        path: { case_id: caseId, step_id: stepId },
+        query: { environment_id: environmentId },
+      },
+    })
+    return data ?? null
+  }
+
+  return { items, total, page, load, loadOne, create, save, debugStep }
 })

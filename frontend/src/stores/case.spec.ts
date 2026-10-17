@@ -94,4 +94,33 @@ describe('caseStore', () => {
       '/api/v1/projects/{project_id}/cases',
     )
   })
+
+  it('debugStep:POST 单步调试端点,带环境 query', async () => {
+    setActivePinia(createPinia())
+    const result = {
+      step_id: 'step-1',
+      step_name: 's1',
+      status: 'passed',
+      duration_ms: 8,
+      attempts: 1,
+      error_message: null,
+      request: null,
+      response: null,
+      extracted: {},
+      assertions: [],
+    }
+    const client = mockClient({ POST: vi.fn(async () => okResponse(result)) })
+    const store = useCaseStore()
+
+    const got = await store.debugStep(7, 'step-1', 3, client)
+
+    expect(got?.status).toBe('passed')
+    const [path, opts] = (client.POST as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { params: { path: { case_id: number; step_id: string }; query: { environment_id: number } } },
+    ]
+    expect(path).toBe('/api/v1/cases/{case_id}/steps/{step_id}/debug')
+    expect(opts.params.path).toEqual({ case_id: 7, step_id: 'step-1' })
+    expect(opts.params.query).toEqual({ environment_id: 3 })
+  })
 })

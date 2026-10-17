@@ -172,6 +172,7 @@ cases
   GET    /cases/{cid}/versions
   GET    /cases/{cid}/versions/{v}
   POST   /cases/{cid}/debug                单用例调试执行
+  POST   /cases/{cid}/steps/{sid}/debug?environment_id=  单步调试(同步执行,不走 Celery;返回变量替换后的请求/真实响应/断言明细/提取结果快照,快照模型与报告端点共用)
 
 plans
   GET    /projects/{pid}/plans

@@ -61,3 +61,13 @@ class RunSummary:
     errored: int
     skipped: int
     duration_ms: float
+
+
+def response_size(response: ResponseSnapshot | None) -> int | None:
+    """真实响应大小:优先 Content-Length(截断时读取的字节数只是下界)。"""
+    if response is None or response.body is None:
+        return None
+    declared = response.headers.get("content-length") if response.headers else None
+    if declared is not None and str(declared).isdigit():
+        return int(declared)
+    return len(response.body.encode("utf-8"))

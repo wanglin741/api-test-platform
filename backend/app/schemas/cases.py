@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.runs import RequestSnapshotOut, ResponseSnapshotOut
+
 
 class CaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
@@ -49,3 +51,32 @@ class CasePage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class DebugAssertionOut(BaseModel):
+    """单条断言的执行结果(结构与引擎 AssertionResult 对齐)。"""
+
+    type: str
+    operator: str
+    expected: Any
+    actual: Any
+    passed: bool
+    message: str | None = None
+
+
+class StepDebugOut(BaseModel):
+    """单步调试结果:同步执行一步,返回变量替换后的请求与真实响应快照。
+
+    快照模型与报告端点共用(RequestSnapshotOut/ResponseSnapshotOut),前端渲染组件得以复用。
+    """
+
+    step_id: str
+    step_name: str
+    status: str
+    duration_ms: float | None = None
+    attempts: int = 1
+    error_message: str | None = None
+    request: RequestSnapshotOut | None = None
+    response: ResponseSnapshotOut | None = None
+    extracted: dict[str, Any] = Field(default_factory=dict)
+    assertions: list[DebugAssertionOut] = Field(default_factory=list)
