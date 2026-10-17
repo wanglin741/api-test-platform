@@ -60,6 +60,8 @@ class DbSink:
         self._run_id = run_id
         self._worker_id = worker_id
         self._step_types = step_types
+        self.assertion_total = 0
+        self.assertion_passed = 0
 
     def on_step_finished(self, result: StepResult) -> None:
         run = self._session.get(Run, self._run_id)
@@ -70,6 +72,8 @@ class DbSink:
         response = result.response
         body_bytes = response.body.encode("utf-8") if response and response.body is not None else None
         assertions = [asdict(a) for a in result.assertions]
+        self.assertion_total += len(assertions)
+        self.assertion_passed += sum(1 for a in assertions if a["passed"])
         row = RunStepResult(
             run_id=self._run_id,
             step_index=result.step_index,
@@ -184,6 +188,8 @@ def execute_run(self, run_id: str) -> None:
                 "failed": summary.failed,
                 "error": summary.errored,
                 "skipped": summary.skipped,
+                "assertion_total": sink.assertion_total,
+                "assertion_passed": sink.assertion_passed,
                 "request_duration_ms": int(summary.duration_ms),
                 "pass_rate": round(summary.passed / summary.total_steps, 3) if summary.total_steps else 0,
             }

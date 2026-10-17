@@ -3,15 +3,26 @@
 import uuid
 
 from fastapi import APIRouter, Depends, Response
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.config import get_settings
 from app.core.errors import ConflictError, not_found
-from app.models import Environment, Project, Run, TestCase, User
-from app.schemas.runs import CancelAck, RunCreate, RunOut, RunTriggered
+from app.models import Environment, Project, Run, RunStepResult, TestCase, User
+from app.schemas.runs import (
+    CancelAck,
+    RequestSnapshotOut,
+    ResponseSnapshotOut,
+    RunCreate,
+    RunOut,
+    RunTriggered,
+    StepList,
+    StepOut,
+)
 from app.tasks.engine_tasks import execute_run
+
+STEPS_HARD_CAP = 2000  # 超过截断并在响应里标记,不静默丢行
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 project_router = APIRouter(prefix="/projects/{project_id}/runs", tags=["runs"])
@@ -94,6 +105,65 @@ async def get_run(
         started_at=run.started_at,
         finished_at=run.finished_at,
     )
+
+
+@router.get("/{run_id}/steps", response_model=StepList)
+async def list_run_steps(
+    run_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StepList:
+    await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
+    result = await session.execute(
+        select(RunStepResult)
+        .where(RunStepResult.run_id == run_id)
+        .order_by(RunStepResult.step_index)
+        .limit(STEPS_HARD_CAP + 1)
+    )
+    rows = list(result.scalars())
+    truncated = len(rows) > STEPS_HARD_CAP
+    rows = rows[:STEPS_HARD_CAP]
+
+    items = []
+    for row in rows:
+        body_text = (
+            bytes(row.response_body).decode("utf-8", errors="replace")
+            if row.response_body is not None
+            else None
+        )
+        items.append(
+            StepOut(
+                id=row.id,
+                step_index=row.step_index,
+                step_name=row.step_name,
+                step_type=row.step_type,
+                status=row.status,
+                duration_ms=row.duration_ms,
+                request=RequestSnapshotOut(
+                    method=row.request_method or "",
+                    url=row.request_url or "",
+                    headers=row.request_headers or {},
+                    body=row.request_body,
+                )
+                if row.request_method is not None
+                else None,
+                response=ResponseSnapshotOut(
+                    status_code=row.response_status,
+                    headers=row.response_headers,
+                    body=body_text,
+                    size=row.response_size,
+                    truncated=row.response_body_truncated,
+                )
+                if row.response_status is not None
+                else None,
+                extracted_variables=row.extracted_variables or {},
+                assertions=row.assertions or [],
+                assertion_total=row.assertion_total,
+                assertion_passed=row.assertion_passed,
+                error_message=row.error_message,
+            )
+        )
+    return StepList(items=items, count=len(items), truncated=truncated)
 
 
 @router.post("/{run_id}/cancel", response_model=CancelAck)

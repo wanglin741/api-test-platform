@@ -6,35 +6,6 @@
 
 import uuid
 
-import pytest
-
-from tests.e2e.server import E2EServer
-
-
-@pytest.fixture(scope="module")
-def local_server():
-    server = E2EServer()
-    host, port = server.server_address[:2]
-    url = f"http://{host}:{port}"
-    import threading
-
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield url
-    server.shutdown()
-    server.server_close()
-
-
-@pytest.fixture(autouse=True)
-def eager_celery():
-    from app.tasks.celery_app import celery_app
-
-    celery_app.conf.task_always_eager = True
-    celery_app.conf.task_eager_propagates = True
-    yield
-    celery_app.conf.task_always_eager = False
-    celery_app.conf.task_eager_propagates = False
-
 
 async def _setup(client, url: str = "http://127.0.0.1:1/unreachable") -> tuple[int, int, int]:
     """建项目 + 环境 + 用例(单步 http),返回 (project_id, env_id, case_id)。"""

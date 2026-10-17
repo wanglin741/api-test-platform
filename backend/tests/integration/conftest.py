@@ -64,6 +64,35 @@ def clean_tables(database: None) -> None:
         )
 
 
+@pytest.fixture(scope="module")
+def local_server():
+    """本地真实 HTTP 服务(真实 socket),供执行链路与验收场景作被测目标。"""
+    import threading
+
+    from tests.e2e.server import E2EServer
+
+    server = E2EServer()
+    host, port = server.server_address[:2]
+    url = f"http://{host}:{port}"
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield url
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture(autouse=True)
+def eager_celery():
+    """Celery eager 模式:任务在进程内同步执行,不依赖 broker。"""
+    from app.tasks.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+    yield
+    celery_app.conf.task_always_eager = False
+    celery_app.conf.task_eager_propagates = False
+
+
 @pytest.fixture
 async def client():
     from app.core.config import get_settings
