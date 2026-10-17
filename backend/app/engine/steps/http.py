@@ -1,11 +1,13 @@
-"""HTTP 步骤执行器:构建请求(变量解析)→ 发送 → 产出请求/响应快照。
+"""HTTP 步骤执行器:构建请求(变量解析)→ 发送 → 提取 → 断言 → 结果。
 
 设计文档《执行引擎》:
 - 请求构建阶段遇到变量解析失败 → 步骤 skipped(不污染报告)
-- 网络异常 → 步骤 error(T4 在此接重试)
+- 只有网络类 TransportError 重试(§9);重试时重新求值变量;断言 failed 不重试
+- 取消是协作式的:重试退避期间分段 sleep、每 0.2s 查一次 token(§10)
 - 响应体截断在 T5 接入流式读取
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +23,9 @@ from app.engine.extractors import ExtractionFailure, extract_value
 from app.engine.results import RequestSnapshot, ResponseSnapshot, StepResult
 from app.engine.variables import VariableResolutionError, VariableScope, stringify
 
+CANCEL_POLL_INTERVAL = 0.2  # 分段 sleep 的检查粒度(§10)
+CONNECT_POOL_TIMEOUT = 5.0  # 连接 / 连接池超时上限(§9 超时层次)
+
 
 @dataclass
 class PreparedBody:
@@ -28,6 +33,14 @@ class PreparedBody:
     files: dict[str, tuple[None, str]] | None = None  # 纯文本 multipart 用 files 形式
     snapshot: str | None = None
     content_type: str | None = None
+
+
+def build_request_timeout(
+    *, step_timeout_ms: int | None, default_timeout_ms: int
+) -> httpx.Timeout:
+    """单步超时可覆盖用例默认;连接与连接池固定 5s(§9 超时层次表)。"""
+    total = (step_timeout_ms or default_timeout_ms) / 1000
+    return httpx.Timeout(total, connect=CONNECT_POOL_TIMEOUT, pool=CONNECT_POOL_TIMEOUT)
 
 
 def build_body(body: RequestBody, scope: VariableScope) -> PreparedBody:
@@ -59,11 +72,24 @@ def build_body(body: RequestBody, scope: VariableScope) -> PreparedBody:
     return PreparedBody(files={k: (None, v) for k, v in flat.items()}, snapshot=None)
 
 
+async def _cancellable_sleep(seconds: float, context: EngineContext) -> bool:
+    """分段 sleep,每 0.2s 查一次取消 token。返回 True 表示已取消。"""
+    deadline = time.perf_counter() + seconds
+    while True:
+        if context.cancellation.cancelled():
+            return True
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(CANCEL_POLL_INTERVAL, remaining))
+
+
 async def run_http_step(
     step: StepSpec,
     scope: VariableScope,
     context: EngineContext,
     client: httpx.AsyncClient,
+    default_timeout_ms: int,
 ) -> StepResult:
     result = StepResult(step_id=step.id, step_name=step.name, step_index=0, status="passed")
 
@@ -72,56 +98,76 @@ async def run_http_step(
         result.error_message = "步骤已禁用 (enabled: false)"
         return result
 
-    # ── 构建阶段:变量解析失败 → skipped ────────────────────────────
-    try:
-        url = scope.resolve(step.request.url)
-        if not isinstance(url, str):
-            raise VariableResolutionError(f"URL 解析结果不是字符串: {url!r}")
-        headers = {k: stringify(scope.resolve(v)) for k, v in step.request.headers.items()}
-        params = {k: stringify(scope.resolve(v)) for k, v in step.request.params.items()}
-        prepared = build_body(step.request.body, scope) if step.request.body else PreparedBody()
-    except VariableResolutionError as exc:
-        result.status = "skipped"
-        result.error_message = str(exc)
-        return result
-    except orjson.JSONDecodeError as exc:
-        # DSL 模板不是合法 JSON —— 保存时校验应拦住(T7),这里兜底归类
-        result.status = "error"
-        result.error_message = f"请求体不是合法 JSON: {exc}"
-        return result
-
-    if prepared.content_type and not any(
-        k.lower() == "content-type" for k in headers
-    ):
-        headers = {**headers, "Content-Type": prepared.content_type}
-
-    result.request = RequestSnapshot(
-        method=step.request.method,
-        url=url,
-        headers=headers,
-        query=params,
-        body=prepared.snapshot,
+    timeout = build_request_timeout(
+        step_timeout_ms=step.request.timeout_ms, default_timeout_ms=default_timeout_ms
     )
+    attempt = 0
+    while True:
+        attempt += 1
+        result.attempts = attempt
+        result.status = "passed"
+        result.error_message = None
 
-    # ── 发送阶段:网络异常 → error ─────────────────────────────────
-    kwargs: dict[str, Any] = {}
-    if prepared.files:
-        kwargs["files"] = prepared.files
-    elif prepared.content is not None:
-        kwargs["content"] = prepared.content
+        # ── 构建阶段:变量解析失败 → skipped(每次重试重新求值,§9)──
+        try:
+            url = scope.resolve(step.request.url)
+            if not isinstance(url, str):
+                raise VariableResolutionError(f"URL 解析结果不是字符串: {url!r}")
+            headers = {k: stringify(scope.resolve(v)) for k, v in step.request.headers.items()}
+            params = {k: stringify(scope.resolve(v)) for k, v in step.request.params.items()}
+            prepared = build_body(step.request.body, scope) if step.request.body else PreparedBody()
+        except VariableResolutionError as exc:
+            result.status = "skipped"
+            result.error_message = str(exc)
+            return result
+        except orjson.JSONDecodeError as exc:
+            # DSL 模板不是合法 JSON —— 保存时校验应拦住(T7),这里兜底归类
+            result.status = "error"
+            result.error_message = f"请求体不是合法 JSON: {exc}"
+            return result
 
-    start = time.perf_counter()
-    try:
-        response = await client.request(
-            step.request.method, url, headers=headers, params=params,
-            follow_redirects=step.request.follow_redirects, **kwargs,
+        if prepared.content_type and not any(
+            k.lower() == "content-type" for k in headers
+        ):
+            headers = {**headers, "Content-Type": prepared.content_type}
+
+        result.request = RequestSnapshot(
+            method=step.request.method,
+            url=url,
+            headers=headers,
+            query=params,
+            body=prepared.snapshot,
         )
-    except httpx.HTTPError as exc:
-        result.status = "error"
-        result.error_message = f"{type(exc).__name__}: {exc}"
+
+        # ── 发送阶段:网络异常 → error,按 RetrySpec 重试 ─────────────
+        kwargs: dict[str, Any] = {}
+        if prepared.files:
+            kwargs["files"] = prepared.files
+        elif prepared.content is not None:
+            kwargs["content"] = prepared.content
+
+        start = time.perf_counter()
+        try:
+            response = await client.request(
+                step.request.method, url, headers=headers, params=params,
+                follow_redirects=step.request.follow_redirects,
+                timeout=timeout, **kwargs,
+            )
+        except httpx.TransportError as exc:
+            result.status = "error"
+            result.error_message = f"{type(exc).__name__}: {exc}"
+            result.duration_ms = (time.perf_counter() - start) * 1000
+            if attempt <= step.retry.times and "error" in step.retry.on:
+                delay_ms = step.retry.interval_ms
+                if step.retry.backoff == "exponential":
+                    delay_ms *= 2 ** (attempt - 1)
+                cancelled = await _cancellable_sleep(delay_ms / 1000, context)
+                if cancelled:
+                    return result  # 退避期间收到取消:停止重试,终态由 run 汇总为 stopped
+                continue
+            return result
         result.duration_ms = (time.perf_counter() - start) * 1000
-        return result
-    result.duration_ms = (time.perf_counter() - start) * 1000
+        break
 
     # form-data 经 httpx 编码后的真实请求体在 resp.request 里
     snapshot_body = prepared.snapshot

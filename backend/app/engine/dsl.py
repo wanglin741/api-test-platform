@@ -67,6 +67,7 @@ class RetrySpec(_EngineModel):
     times: int = Field(default=0, ge=0)
     interval_ms: int = Field(default=1000, ge=0)
     on: tuple[Literal["error"], ...] = ("error",)
+    backoff: Literal["fixed", "exponential"] = "fixed"
 
 
 class StepSpec(_EngineModel):
