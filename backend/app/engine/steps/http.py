@@ -44,6 +44,11 @@ def build_request_timeout(
 
 
 def build_body(body: RequestBody, scope: VariableScope) -> PreparedBody:
+    if body.content is None:
+        # 声明了 body 类型但没有内容:不发请求体
+        # (否则 json 会发出字面量 "null"、raw 发出 "None" —— build_body(None) 探针确认过)
+        return PreparedBody()
+
     if body.type == "json":
         # 先 parse 再 resolve:整体占位符的值替换进已解析结构,才能保留
         # 原生类型({"id": "{{user_id}}"} + user_id=5 → 5 而非 "5")

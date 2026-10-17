@@ -70,26 +70,28 @@ const syntaxError = ref('')
 let syncingFromText = false
 
 // ── 脏步骤(调研 §B1/Apifox 小圆点):与上次保存的快照按步骤比对 ──
+// 内容按 id 比对;顺序单独快照 —— 拖拽重排不改任何一步的 JSON,
+// 但位移后的步骤占着别的位置,同样算脏(小圆点 + isDirty 都能看到)
 const savedSteps = ref<Record<string, string>>({})
 const savedConfig = ref('')
+const savedOrder = ref<string[]>([])
 
 function snapshotDsl() {
   const map: Record<string, string> = {}
   for (const s of dsl.value?.steps ?? []) map[s.id] = JSON.stringify(s)
   savedSteps.value = map
   savedConfig.value = JSON.stringify(dsl.value?.config)
+  savedOrder.value = (dsl.value?.steps ?? []).map((s) => s.id)
 }
 
-function dirtyOf(step: StepSpec): boolean {
-  return JSON.stringify(step) !== savedSteps.value[step.id]
+function dirtyOf(step: StepSpec, index: number): boolean {
+  return JSON.stringify(step) !== savedSteps.value[step.id] || savedOrder.value[index] !== step.id
 }
 
 const isDirty = computed(() => {
   if (!dsl.value) return false
   if (JSON.stringify(dsl.value.config) !== savedConfig.value) return true
-  const steps = dsl.value.steps
-  if (Object.keys(savedSteps.value).length !== steps.length) return true
-  return steps.some((s) => dirtyOf(s))
+  return dsl.value.steps.some((s, i) => dirtyOf(s, i))
 })
 
 // ── 编排视图:左步骤列表 + 右详情面板 ────────────────────────────
@@ -190,6 +192,7 @@ function removeStep(index: number) {
 const debugEnvId = ref<number | null>(null)
 const debugResult = ref<StepDebugOut | null>(null)
 const debugging = ref(false)
+let debugSeq = 0 // 请求序号:慢的旧调试响应不得覆盖新选中步骤的结果
 
 async function runDebug(step: StepSpec) {
   if (debugEnvId.value === null) {
@@ -197,6 +200,7 @@ async function runDebug(step: StepSpec) {
     return
   }
   selectStep(step.id)
+  const seq = ++debugSeq
   debugResult.value = null
   if (isDirty.value) {
     const ok = await save()
@@ -204,9 +208,12 @@ async function runDebug(step: StepSpec) {
   }
   debugging.value = true
   try {
-    debugResult.value = await caseStore.debugStep(caseId, step.id, debugEnvId.value)
+    const result = await caseStore.debugStep(caseId, step.id, debugEnvId.value)
+    if (seq === debugSeq) debugResult.value = result
+  } catch {
+    // 错误已由全局拦截器提示;面板保留空态
   } finally {
-    debugging.value = false
+    if (seq === debugSeq) debugging.value = false
   }
 }
 
@@ -327,7 +334,7 @@ async function save(): Promise<boolean> {
                   <el-icon class="drag-handle"><Rank /></el-icon>
                   <span class="no">#{{ index + 1 }}</span>
                   <span class="item-name">{{ element.name || '未命名步骤' }}</span>
-                  <span v-if="dirtyOf(element)" class="dirty-dot" title="未保存" />
+                  <span v-if="dirtyOf(element, index)" class="dirty-dot" title="未保存" />
                   <span class="ops" @click.stop>
                     <el-tooltip content="调试" placement="top">
                       <el-button
@@ -339,12 +346,7 @@ async function save(): Promise<boolean> {
                       />
                     </el-tooltip>
                     <el-tooltip content="复制" placement="top">
-                      <el-button
-                        :icon="CopyDocument"
-                        text
-                        size="small"
-                        @click="copyStep(index)"
-                      />
+                      <el-button :icon="CopyDocument" text size="small" @click="copyStep(index)" />
                     </el-tooltip>
                     <el-tooltip content="删除" placement="top">
                       <el-button
@@ -364,11 +366,7 @@ async function save(): Promise<boolean> {
             >
           </div>
           <div class="detail-pane">
-            <StepDetail
-              v-if="selectedStep"
-              :model-value="selectedStep"
-              :key="selectedStep.id"
-            />
+            <StepDetail v-if="selectedStep" :model-value="selectedStep" :key="selectedStep.id" />
             <el-empty v-else description="在左侧选择或添加步骤" :image-size="80" />
             <DebugPanel :result="debugResult" :loading="debugging" />
           </div>

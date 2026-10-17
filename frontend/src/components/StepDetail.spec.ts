@@ -104,6 +104,41 @@ describe('StepDetail', () => {
     expect(step.assert).toHaveLength(1) // 断言行不受影响
   })
 
+  it('Body 清空:content 保持空串而非 null(引擎会发出字面量 "null"/"None")', async () => {
+    const step = makeStep({
+      request: {
+        ...makeStep().request,
+        body: { type: 'json', content: '{"a":1}' },
+      },
+    })
+    const wrapper = await mountDetail(step)
+
+    const textarea = wrapper.find('.body-content textarea')
+    expect(textarea.exists()).toBe(true)
+    await textarea.setValue('') // 全选删除
+
+    expect(step.request.body?.content).toBe('')
+  })
+
+  it('断言期望值:true/false/null 关键字还原为原生值(引擎 _eq 布尔只与布尔比较)', async () => {
+    const step = makeStep({
+      assert: [{ type: 'jsonpath', operator: 'eq', expected: true, expression: '$.deleted' }],
+    })
+    const wrapper = await mountDetail(step)
+
+    const input = wrapper.find('input[placeholder="期望值"]')
+    expect((input.element as HTMLInputElement).value).toBe('true')
+
+    await input.setValue('false')
+    expect(step.assert?.[0]?.expected).toBe(false)
+
+    await input.setValue('null')
+    expect(step.assert?.[0]?.expected).toBeNull()
+
+    await input.setValue('ok')
+    expect(step.assert?.[0]?.expected).toBe('ok')
+  })
+
   it('重试与启用:直接写回 step', async () => {
     const step = makeStep()
     const wrapper = await mountDetail(step)

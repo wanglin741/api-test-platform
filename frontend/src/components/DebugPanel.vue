@@ -41,6 +41,8 @@ function pretty(text: string | null | undefined): string {
 const responseBody = computed(() => pretty(props.result?.response?.body))
 const requestBody = computed(() => pretty(props.result?.request?.body))
 
+const queryEntries = computed(() => Object.entries(props.result?.request?.query ?? {}))
+
 const assertSummary = computed(() => {
   const list = props.result?.assertions ?? []
   const passed = list.filter((a) => a.passed).length
@@ -54,7 +56,9 @@ const extractedEntries = computed(() => Object.entries(props.result?.extracted ?
   <div v-loading="loading" class="debug-panel">
     <template v-if="result">
       <div class="debug-head">
-        <el-tag :type="STATUS_TAG[result.status] ?? 'info'" size="small">{{ result.status }}</el-tag>
+        <el-tag :type="STATUS_TAG[result.status] ?? 'info'" size="small">{{
+          result.status
+        }}</el-tag>
         <span class="meta">{{ result.duration_ms ?? 0 }}ms · 第 {{ result.attempts }} 次尝试</span>
         <span class="layout-switch">
           分栏:
@@ -82,9 +86,16 @@ const extractedEntries = computed(() => Object.entries(props.result?.extracted ?
               <el-tag size="small" type="info">{{ result.request.method }}</el-tag>
               <code class="url">{{ result.request.url }}</code>
             </div>
+            <div v-if="queryEntries.length" class="kv-block">
+              <div v-for="[k, v] in queryEntries" :key="k" class="kv-line">
+                <span class="k">{{ k }}</span
+                >: <span class="v">{{ v }}</span>
+              </div>
+            </div>
             <div class="kv-block">
               <div v-for="(v, k) in result.request.headers" :key="k" class="kv-line">
-                <span class="k">{{ k }}</span>: <span class="v">{{ v }}</span>
+                <span class="k">{{ k }}</span
+                >: <span class="v">{{ v }}</span>
               </div>
             </div>
             <pre v-if="requestBody" class="pre">{{ requestBody }}</pre>
@@ -103,7 +114,8 @@ const extractedEntries = computed(() => Object.entries(props.result?.extracted ?
           <template v-if="result.response">
             <div class="kv-block">
               <div v-for="(v, k) in result.response.headers ?? {}" :key="k" class="kv-line">
-                <span class="k">{{ k }}</span>: <span class="v">{{ v }}</span>
+                <span class="k">{{ k }}</span
+                >: <span class="v">{{ v }}</span>
               </div>
             </div>
             <pre class="pre">{{ responseBody }}</pre>
@@ -133,7 +145,11 @@ const extractedEntries = computed(() => Object.entries(props.result?.extracted ?
             <el-tag size="small" type="success">{{ k }}</el-tag>
             <code>{{ v }}</code>
           </div>
-          <el-empty v-if="extractedEntries.length === 0" description="未提取变量" :image-size="60" />
+          <el-empty
+            v-if="extractedEntries.length === 0"
+            description="未提取变量"
+            :image-size="60"
+          />
         </el-tab-pane>
       </el-tabs>
     </template>

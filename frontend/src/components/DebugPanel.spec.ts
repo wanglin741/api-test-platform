@@ -20,6 +20,7 @@ const RESULT: StepDebugOut = {
     method: 'GET',
     url: 'http://127.0.0.1:9999/json',
     headers: { Authorization: 'Bearer x' },
+    query: { q: '{{name}} 解析后的值' },
     body: null,
   },
   response: {
@@ -31,7 +32,14 @@ const RESULT: StepDebugOut = {
   },
   extracted: { hello: 'world' },
   assertions: [
-    { type: 'status_code', operator: 'eq', expected: 200, actual: 200, passed: true, message: null },
+    {
+      type: 'status_code',
+      operator: 'eq',
+      expected: 200,
+      actual: 200,
+      passed: true,
+      message: null,
+    },
     {
       type: 'jsonpath',
       operator: 'eq',
@@ -58,6 +66,9 @@ describe('DebugPanel', () => {
 
     expect(wrapper.find('.debug-head').text()).toContain('passed')
     expect(wrapper.find('.request-line').text()).toContain('http://127.0.0.1:9999/json')
+    // 查询参数单列展示(变量替换后)
+    expect(wrapper.findAll('.pane')[0]?.text()).toContain('q')
+    expect(wrapper.findAll('.pane')[0]?.text()).toContain('解析后的值')
     // 响应体 pretty-print 后仍含关键字段
     expect(wrapper.find('.pre').text()).toContain('"hello"')
     expect(wrapper.findAll('.pane-title')[1]?.text()).toContain('200')

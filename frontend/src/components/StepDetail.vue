@@ -4,7 +4,13 @@ import { computed } from 'vue'
 
 import KvEditor from './KvEditor.vue'
 
-import { ASSERT_OPERATORS, ASSERT_TYPES, BODY_TYPES, EXTRACT_TYPES, HTTP_METHODS } from '@/types/dsl'
+import {
+  ASSERT_OPERATORS,
+  ASSERT_TYPES,
+  BODY_TYPES,
+  EXTRACT_TYPES,
+  HTTP_METHODS,
+} from '@/types/dsl'
 
 import type { AssertSpec, BodyType, ExtractSpec, StepSpec } from '@/types/dsl'
 
@@ -55,7 +61,8 @@ const bodyText = computed<string>({
   },
   set(text) {
     const body = step.value.request.body
-    if (body) body.content = text === '' ? null : text
+    // 清空保持 '':置 null 会让引擎把字面量 "None"/"null" 当请求体发出去
+    if (body) body.content = text
   },
 })
 
@@ -101,7 +108,12 @@ function expectedText(spec: AssertSpec): string {
 }
 
 function setExpected(spec: AssertSpec, text: string) {
-  spec.expected = text
+  // 布尔/null 关键字还原为原生值:引擎 _eq 对布尔只与布尔比较,"true" 恒 FAIL;
+  // 其余保持字符串(数字由引擎强制转换,见前端设计 §6.1)
+  if (text === 'true') spec.expected = true
+  else if (text === 'false') spec.expected = false
+  else if (text === 'null') spec.expected = null
+  else spec.expected = text
 }
 </script>
 
@@ -118,11 +130,7 @@ function setExpected(spec: AssertSpec, text: string) {
       >
         <el-option v-for="m in HTTP_METHODS" :key="m" :label="m" :value="m" />
       </el-select>
-      <el-input
-        v-model="step.request.url"
-        placeholder="URL,支持 {{var}} 引用"
-        class="url"
-      />
+      <el-input v-model="step.request.url" placeholder="URL,支持 {{var}} 引用" class="url" />
     </div>
 
     <el-tabs class="request-tabs">
@@ -130,7 +138,11 @@ function setExpected(spec: AssertSpec, text: string) {
         <KvEditor v-model="step.request.params" key-placeholder="参数名" value-placeholder="值" />
       </el-tab-pane>
       <el-tab-pane label="Headers">
-        <KvEditor v-model="step.request.headers" key-placeholder="Header 名" value-placeholder="值" />
+        <KvEditor
+          v-model="step.request.headers"
+          key-placeholder="Header 名"
+          value-placeholder="值"
+        />
       </el-tab-pane>
       <el-tab-pane label="Body">
         <div class="body-row">

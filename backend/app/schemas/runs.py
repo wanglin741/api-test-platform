@@ -41,6 +41,9 @@ class RequestSnapshotOut(BaseModel):
     method: str
     url: str
     headers: dict[str, str]
+    # 查询参数单列(引擎把 params 放进 RequestSnapshot.query,不拼进 url);
+    # 报告端点未落库该字段,暂只有单步调试返回
+    query: dict[str, str] | None = None
     body: str | None = None
 
 

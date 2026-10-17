@@ -15,7 +15,7 @@ _Avoid_: 工作区、空间
 _Avoid_: 配置、profile
 
 **变量(Variable)**:
-带作用域的键值对,分项目级与环境级,步骤内以 `${name}` 引用;可标记加密(`is_secret`)。
+带作用域的键值对,分项目级与环境级,步骤内以 `{{name}}` 引用;可标记加密(`is_secret`)。
 _Avoid_: 参数、常量
 
 **用例(TestCase)**:

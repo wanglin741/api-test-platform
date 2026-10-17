@@ -128,6 +128,40 @@ async def test_debug_case_not_found(client):
     assert resp.json()["error"]["code"] == "case_not_found"
 
 
+async def test_debug_request_query_snapshot_resolved(client, local_server):
+    """查询参数单列返回且经过变量解析(引擎把 params 放进 query,不拼进 url)。
+
+    本地服务按精确 path 匹配,带 query 会 404 —— 但 query 快照在发送前已生成,
+    恰好验证「快照来自实际构建的请求」而非响应。
+    """
+    dsl = _debug_dsl(f"{local_server}/json")
+    dsl["steps"][0]["request"]["params"] = {"q": "{{name}}", "page": "2"}
+    project_id, env_id, case_id = await _setup(client, dsl)
+
+    resp = await client.post(
+        f"/api/v1/cases/{case_id}/steps/s1/debug?environment_id={env_id}"
+    )
+    body = resp.json()
+    assert body["request"]["query"] == {"q": "world", "page": "2"}
+
+
+async def test_debug_engine_exception_becomes_step_error_not_500(client, local_server):
+    """坏 JSONPath 表达式等非 TransportError 异常:步骤级 error,而非 500。"""
+    dsl = _debug_dsl(f"{local_server}/json")
+    dsl["steps"][0]["assert"] = [
+        {"type": "jsonpath", "operator": "eq", "expected": 1, "expression": "$.a["}
+    ]
+    project_id, env_id, case_id = await _setup(client, dsl)
+
+    resp = await client.post(
+        f"/api/v1/cases/{case_id}/steps/s1/debug?environment_id={env_id}"
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "error"
+    assert body["error_message"] is not None
+
+
 async def test_debug_environment_must_belong_to_case_project(client, local_server):
     project_id, env_id, case_id = await _setup(client, _debug_dsl(f"{local_server}/json"))
     other = (await client.post("/api/v1/projects", json={"name": "别的项目"})).json()

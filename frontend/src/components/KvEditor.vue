@@ -25,9 +25,15 @@ watch(model, () => {
 })
 
 function editKey(row: KvRow, newKey: string) {
-  if (row.key && row.key !== newKey) delete model.value[row.key]
+  if (row.key && row.key !== newKey) {
+    // 改名只搬引用:值取原 dict 里的原始值(类型不动),不用行上的字符串化副本
+    const original = model.value[row.key]
+    delete model.value[row.key]
+    if (newKey) model.value[newKey] = original ?? row.value
+  } else if (!row.key && newKey) {
+    model.value[newKey] = row.value
+  }
   row.key = newKey
-  if (newKey) model.value[newKey] = row.value
 }
 
 function editValue(row: KvRow, newValue: string) {

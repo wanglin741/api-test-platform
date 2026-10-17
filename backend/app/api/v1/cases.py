@@ -12,11 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.api.v1.common import get_project_or_404
+from app.core.config import get_settings
 from app.core.errors import ValidationFailedError, not_found
 from app.engine.context import EngineContext
 from app.engine.defaults import InMemorySink
 from app.engine.dsl import parse_dsl
-from app.engine.results import response_size
+from app.engine.results import StepResult, response_size
 from app.engine.steps.http import run_http_step
 from app.engine.variables import VariableScope
 from app.models import Environment, Project, TestCase, TestCaseVersion, User, Variable
@@ -258,12 +259,26 @@ async def debug_step(
     scope = VariableScope(
         project=project_vars, environment=env_vars, case=dsl.config.variables
     )
+    settings = get_settings()
     context = EngineContext(
         sink=InMemorySink(),
+        # run_http_step 直接使用显式传入的 client,factory/sink 是 EngineContext 的必填契约位
         http_client_factory=lambda verify: httpx.AsyncClient(follow_redirects=True, verify=verify),
+        body_max_bytes=settings.body_max_bytes,  # 与报告链路同一截断阈值
     )
     async with httpx.AsyncClient(follow_redirects=True, verify=step.request.verify_ssl) as client:
-        result = await run_http_step(step, scope, context, client, dsl.config.timeout_ms)
+        try:
+            result = await run_http_step(step, scope, context, client, dsl.config.timeout_ms)
+        except Exception as exc:
+            # 引擎只兜底 TransportError;调试要给步骤级反馈而非 500:
+            # 坏 JSONPath 表达式、非法 URL、重定向循环等都属于用户的步骤问题
+            result = StepResult(
+                step_id=step.id,
+                step_name=step.name,
+                step_index=0,
+                status="error",
+                error_message=f"{type(exc).__name__}: {exc}",
+            )
 
     return StepDebugOut(
         step_id=result.step_id,
@@ -276,6 +291,7 @@ async def debug_step(
             method=result.request.method,
             url=result.request.url,
             headers=result.request.headers,
+            query=result.request.query,
             body=result.request.body,
         )
         if result.request is not None

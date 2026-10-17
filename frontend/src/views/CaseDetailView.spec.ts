@@ -132,6 +132,36 @@ describe('CaseDetailView', () => {
     expect(wrapper.find('.dirty-dot').exists()).toBe(false)
   })
 
+  it('拖拽重排:不改动任何一步内容也算脏,保存按新顺序提交', async () => {
+    const TWO_STEPS = {
+      ...DETAIL,
+      dsl: {
+        dsl_version: 1,
+        steps: [
+          { id: 'step-1', name: 'a', request: { method: 'GET', url: '/a' } },
+          { id: 'step-2', name: 'b', request: { method: 'GET', url: '/b' } },
+        ],
+      },
+    }
+    get.mockResolvedValue(okResponse(TWO_STEPS))
+    patch.mockResolvedValue(okResponse({ ...TWO_STEPS, current_version: 3 }))
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.dirty-dot').exists()).toBe(false)
+    // 模拟拖拽结果:draggable 回吐换序后的同一批步骤对象
+    const draggable = wrapper.findComponent({ name: 'draggable' })
+    const steps = draggable.props('modelValue') as { id: string }[]
+    draggable.vm.$emit('update:modelValue', [steps[1], steps[0]])
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.dirty-dot').exists()).toBe(true)
+
+    await wrapper.find('.save-btn').trigger('click')
+    await flushPromises()
+    const [, opts] = patch.mock.calls[0] as [string, { body: { dsl: { steps: { id: string }[] } } }]
+    expect(opts.body.dsl.steps.map((s) => s.id)).toEqual(['step-2', 'step-1'])
+  })
+
   it('单步调试:先保存脏改动再调同步端点,结果渲染进调试面板', async () => {
     get.mockImplementation((path: string) => {
       if (path.includes('/environments')) {

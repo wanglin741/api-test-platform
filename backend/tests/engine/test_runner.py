@@ -278,6 +278,28 @@ class TestRequestBodyVariants:
 
         assert captured_body(seen[0]) == "hello world"
 
+    @pytest.mark.parametrize("body_type", ["json", "raw"])
+    async def test_typed_body_without_content_sends_no_body(
+        self, sink: InMemorySink, body_type: str
+    ) -> None:
+        """声明了 body 类型但没有 content:不发请求体(而非字面量 "null"/"None")。"""
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return json_response(200)
+
+        doc = one_step_doc(
+            request={
+                "method": "POST",
+                "url": "https://api.example.com/echo",
+                "body": {"type": body_type},
+            }
+        )
+        await execute(parse_dsl(doc), make_context(sink, handler))
+
+        assert not captured_body(seen[0])  # 无请求体(captured_body 对空体返回 None)
+
 
 class TestSummary:
     async def test_summary_counts_and_duration(self, sink: InMemorySink) -> None:
