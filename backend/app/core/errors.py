@@ -41,8 +41,10 @@ class ValidationFailedError(AppError):
 
 
 def not_found(resource: str, resource_id: object) -> NotFoundError:
-    """资源不存在。对外不区分「不存在」与「无权访问」(避免探测)。"""
+    """资源不存在。code 为资源级稳定标识(如 case_not_found,API 设计 §1 示例);
+    对外不区分「不存在」与「无权访问」(避免探测)。"""
     return NotFoundError(
         f"{resource} 不存在",
-        details={f"{resource}_id": resource_id, "code_hint": f"{resource}_not_found"},
+        code=f"{resource}_not_found",
+        details={f"{resource}_id": resource_id},
     )

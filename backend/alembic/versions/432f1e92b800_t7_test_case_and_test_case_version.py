@@ -31,7 +31,7 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
-    sa.CheckConstraint("priority IN ('P0', 'P1', 'P2', 'P3')", name=op.f('ck_test_case_ck_test_case_priority')),
+    sa.CheckConstraint("priority IN ('P0', 'P1', 'P2', 'P3')", name=op.f('ck_test_case_priority')),
     sa.ForeignKeyConstraint(['created_by'], ['user.id'], name='fk_test_case_created_by_user'),
     sa.ForeignKeyConstraint(['project_id'], ['project.id'], name=op.f('fk_test_case_project_id_project')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_test_case'))

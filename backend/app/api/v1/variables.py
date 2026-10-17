@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.core.errors import not_found
-from app.api.v1.environments import _get_environment_or_404, _get_project_or_404
+from app.api.v1.common import get_project_or_404
+from app.api.v1.environments import _get_environment_or_404
 from app.models import User, Variable
 from app.schemas.resources import VariableOut, VariableReplace
 
@@ -52,7 +53,7 @@ async def list_project_variables(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[VariableOut]:
-    await _get_project_or_404(session, project_id)
+    await get_project_or_404(session, project_id)
     variables = await _list_variables(session, project_id, None)
     return [VariableOut.from_model(v) for v in variables]
 
@@ -64,7 +65,7 @@ async def replace_project_variables(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[VariableOut]:
-    await _get_project_or_404(session, project_id)
+    await get_project_or_404(session, project_id)
     variables = await _replace_variables(session, project_id, None, payload)
     return [VariableOut.from_model(v) for v in variables]
 

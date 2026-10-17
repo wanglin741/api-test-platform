@@ -5,18 +5,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1.common import get_project_or_404
 from app.core.errors import not_found
 from app.models import Project, User
 from app.schemas.resources import ProjectCreate, ProjectOut, ProjectUpdate
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-
-
-async def _get_project_or_404(session: AsyncSession, project_id: int) -> Project:
-    project = await session.get(Project, project_id)
-    if project is None or project.deleted_at is not None:
-        raise not_found("project", project_id)
-    return project
 
 
 @router.post("", status_code=201, response_model=ProjectOut)
@@ -39,7 +33,7 @@ async def list_projects(
     user: User = Depends(get_current_user),
 ) -> list[Project]:
     result = await session.execute(
-        select(Project).where(Project.deleted_at.is_(None)).order_by(Project.id)
+        select(Project).where(Project.alive()).order_by(Project.id)
     )
     return list(result.scalars())
 
@@ -50,7 +44,7 @@ async def get_project(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Project:
-    return await _get_project_or_404(session, project_id)
+    return await get_project_or_404(session, project_id)
 
 
 @router.patch("/{project_id}", response_model=ProjectOut)
@@ -60,7 +54,7 @@ async def update_project(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Project:
-    project = await _get_project_or_404(session, project_id)
+    project = await get_project_or_404(session, project_id)
     data = payload.model_dump(exclude_unset=True)
     for field, value in data.items():
         setattr(project, field, value)
@@ -75,6 +69,6 @@ async def delete_project(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> None:
-    project = await _get_project_or_404(session, project_id)
+    project = await get_project_or_404(session, project_id)
     project.deleted_at = func.now()
     await session.flush()

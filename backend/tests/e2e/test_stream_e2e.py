@@ -36,7 +36,7 @@ def server() -> E2EServer:
 def make_context_for(sink: InMemorySink, port: int, **kwargs: object) -> EngineContext:
     return EngineContext(
         sink=sink,
-        http_client_factory=lambda: httpx.AsyncClient(),
+        http_client_factory=lambda verify=True: httpx.AsyncClient(verify=verify),
         body_max_bytes=BODY_LIMIT,
         **kwargs,
     )

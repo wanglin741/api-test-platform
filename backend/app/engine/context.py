@@ -12,8 +12,10 @@ from app.engine.protocols import CancellationToken, ProgressPublisher, ResultSin
 @dataclass
 class EngineContext:
     sink: ResultSink
-    # 每次执行调用一次,返回新 AsyncClient;测试传 MockTransport 绑定的工厂
-    http_client_factory: Callable[[], httpx.AsyncClient]
+    # 工厂签名 factory(verify: bool) -> AsyncClient:verify_ssl 是步骤级开关,
+    # 而 httpx 的 verify 只能挂在整个 client 上,runner 按 flag 缓存复用。
+    # 测试传 MockTransport 绑定的工厂(忽略 verify)。
+    http_client_factory: Callable[..., httpx.AsyncClient]
 
     project_variables: dict[str, Any] = field(default_factory=dict)
     environment_variables: dict[str, Any] = field(default_factory=dict)

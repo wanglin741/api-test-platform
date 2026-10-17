@@ -1,10 +1,10 @@
 """执行任务:触发到落库的胶水层(执行引擎 §13)。
 
-职责仅四步:同步会话加载配置 → 组装 EngineContext → asyncio.run 驱动引擎
-→ 汇总写终态。任何业务规则(变量、断言、取消时机)都在引擎里。
+职责仅四步:同步会话加载配置 → 组装 EngineContext → 驱动引擎 → 汇总写终态。
+任何业务规则(变量、断言、取消时机)都在引擎里。
 
 worker 全程同步 Session + psycopg(D6):AsyncClient 只在协程内部创建,
-asyncio.run 每次任务独立起停,不跨事件循环复用任何异步对象。
+引擎协程跑在独立线程的新事件循环里,不跨事件循环复用任何异步对象。
 """
 
 import asyncio
@@ -17,17 +17,16 @@ from dataclasses import asdict
 
 import httpx
 import redis as redis_py
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.engine import execute as engine_execute
+from app.db.session import make_sync_engine, make_sync_session_factory
+from app.engine import EngineContext, execute as engine_execute
 from app.engine.dsl import parse_dsl
 from app.engine.results import StepResult
-from app.models import Environment, Run, RunStepResult, TestCaseVersion, Variable
+from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
 from app.tasks.celery_app import celery_app
-
-TERMINAL_STATUSES = ("success", "failed", "error", "stopped")
 
 
 class OwnershipLost(Exception):
@@ -50,6 +49,16 @@ class RedisCancellationToken:
             self._cached = bool(self._client.exists(self._key))
             self._cache_until = now + self._cache_ttl
         return self._cached
+
+
+def _response_size(response) -> int | None:
+    """真实响应大小:优先 Content-Length(截断时读取的字节数只是下界)。"""
+    if response is None or response.body is None:
+        return None
+    declared = response.headers.get("content-length") if response.headers else None
+    if declared is not None and str(declared).isdigit():
+        return int(declared)
+    return len(response.body.encode("utf-8"))
 
 
 class DbSink:
@@ -87,7 +96,7 @@ class DbSink:
             request_body=request.body if request else None,
             response_status=response.status_code if response else None,
             response_headers=response.headers if response else None,
-            response_size=len(body_bytes) if body_bytes is not None else None,
+            response_size=_response_size(response),
             response_body=body_bytes,
             # >64KB 转对象存储(MVP 不接 MinIO),object_key 始终为空
             response_body_object_key=None,
@@ -124,19 +133,20 @@ def _load_variables(session: Session, run: Run) -> tuple[dict, dict]:
 def execute_run(self, run_id: str) -> None:
     settings = get_settings()
     worker_id = f"{socket.gethostname()}:{uuid.uuid4()}"
-    sync_engine = create_engine(settings.database_url_sync)
+    sync_engine = make_sync_engine(settings.database_url_sync)
     try:
-        with Session(sync_engine) as session:
+        with make_sync_session_factory(sync_engine)() as session:
             run = session.get(Run, uuid.UUID(run_id))
             # 幂等检查:acks_late + reject_on_worker_lost 下任务会被重投
-            if run is None or run.status in TERMINAL_STATUSES:
+            if run is None or run.status in RUN_TERMINAL_STATUSES:
                 return
 
             run.status = "running"
             run.worker_id = worker_id
-            run.started_at = run.updated_at  # 时间戳以 DB 为准,先占位,commit 后刷新
+            run.started_at = func.now()  # 时间戳一律 DB now(),不信任应用时钟
             run.celery_task_id = self.request.id
             session.commit()
+            session.refresh(run)  # 取回 DB 生成的时间戳
 
             version = session.execute(
                 select(TestCaseVersion).where(
@@ -154,11 +164,9 @@ def execute_run(self, run_id: str) -> None:
                 {i: step.type for i, step in enumerate(dsl.steps)},
             )
 
-            def http_client_factory() -> httpx.AsyncClient:
-                # 在 asyncio.run 的事件循环内被调用,AsyncClient 不跨循环复用
-                return httpx.AsyncClient(follow_redirects=True)
-
-            from app.engine import EngineContext
+            def http_client_factory(verify: bool = True) -> httpx.AsyncClient:
+                # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用
+                return httpx.AsyncClient(follow_redirects=True, verify=verify)
 
             context = EngineContext(
                 sink=sink,
@@ -180,8 +188,10 @@ def execute_run(self, run_id: str) -> None:
                 return
 
             run.status = summary.status
-            run.finished_at = run.updated_at
+            run.finished_at = func.now()
             run.duration_ms = int(summary.duration_ms)
+            # skipped 步骤不参与通过率(执行引擎 §3)
+            executed = summary.total_steps - summary.skipped
             run.summary = {
                 "total": summary.total_steps,
                 "passed": summary.passed,
@@ -191,7 +201,7 @@ def execute_run(self, run_id: str) -> None:
                 "assertion_total": sink.assertion_total,
                 "assertion_passed": sink.assertion_passed,
                 "request_duration_ms": int(summary.duration_ms),
-                "pass_rate": round(summary.passed / summary.total_steps, 3) if summary.total_steps else 0,
+                "pass_rate": round(summary.passed / executed, 3) if executed else 0,
             }
             session.commit()
     except OwnershipLost:

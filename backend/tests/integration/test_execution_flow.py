@@ -88,7 +88,8 @@ async def test_trigger_validates_ownership(client, local_server):
         json={"case_id": case_id, "environment_id": env_id},
     )
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "not_found"
+    # 归属不符按「不存在」返回,code 资源化且不区分「不存在/不属于」
+    assert resp.json()["error"]["code"] == "case_not_found"
 
 
 async def test_cancel_finished_run_conflict(client, local_server):

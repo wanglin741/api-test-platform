@@ -15,6 +15,7 @@ from jsonpath_ng import parse as jsonpath_parse
 
 from app.engine.dsl import AssertSpec
 from app.engine.results import AssertionResult, ResponseSnapshot
+from app.engine.variables import stringify
 
 _ORDERING_OPS = {"gt", "gte", "lt", "lte"}
 
@@ -39,9 +40,9 @@ def _both_bool(a: Any, b: Any) -> bool:
     return isinstance(a, bool) and isinstance(b, bool)
 
 
-def _identity(a: Any, b: Any) -> bool:
-    """None / bool 等非数值类型的严格相等。"""
-    return a is b if a is None or b is None else False
+def _none_eq(a: Any, b: Any) -> bool:
+    """None 的相等语义:两侧都是 None 才相等。"""
+    return a is None and b is None
 
 
 def compare(actual: Any, operator: str, expected: Any) -> bool:
@@ -55,7 +56,7 @@ def compare(actual: Any, operator: str, expected: Any) -> bool:
     if operator == "contains":
         return _contains(actual, expected)
     if operator == "regex_match":
-        return re.search(str(expected), stringify_any(actual)) is not None
+        return re.search(str(expected), stringify(actual)) is not None
     raise ValueError(f"不支持的断言操作符: {operator}")
 
 
@@ -65,7 +66,7 @@ def _eq(actual: Any, expected: Any) -> bool:
     if isinstance(actual, bool) or isinstance(expected, bool):
         return False
     if actual is None or expected is None:
-        return _identity(actual, expected)
+        return _none_eq(actual, expected)
 
     a_num, b_num = _to_number(actual), _to_number(expected)
     if a_num is not None and b_num is not None:
@@ -101,16 +102,6 @@ def _contains(actual: Any, expected: Any) -> bool:
         return expected in actual
     except TypeError:
         return False
-
-
-def stringify_any(value: Any) -> str:
-    if value is None:
-        return ""
-    if value is True:
-        return "true"
-    if value is False:
-        return "false"
-    return str(value)
 
 
 def _resolve_source(spec: AssertSpec, response: ResponseSnapshot | None, duration_ms: float | None) -> Any:

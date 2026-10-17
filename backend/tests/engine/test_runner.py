@@ -300,3 +300,82 @@ class TestSummary:
 
         assert (summary.total_steps, summary.passed, summary.skipped) == (3, 1, 2)
         assert summary.duration_ms >= 0
+
+
+class TestVerifySslClientCaching:
+    """verify_ssl 是步骤级开关,runner 按 flag 向工厂要 client 并复用。"""
+
+    async def test_factory_called_once_per_verify_flag(self, sink: InMemorySink) -> None:
+        calls: list[bool] = []
+
+        def factory(verify: bool = True) -> httpx.AsyncClient:
+            calls.append(verify)
+            return httpx.AsyncClient(transport=httpx.MockTransport(lambda r: json_response(200)))
+
+        doc = {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {"id": "a", "name": "a", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/a"}},
+                {"id": "b", "name": "b", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/b",
+                             "verify_ssl": False}},
+                {"id": "c", "name": "c", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/c",
+                             "verify_ssl": False}},
+            ],
+        }
+        context = EngineContext(sink=sink, http_client_factory=factory)
+        summary = await execute(parse_dsl(doc), context)
+
+        assert summary.status == "success"
+        # 同一 flag 只创建一次:True ×1,False ×1(缓存复用,不逐步新建)
+        assert calls == [True, False]
+
+
+class TestFailFast:
+    async def test_fail_fast_skips_steps_after_failure(self, sink: InMemorySink) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return json_response(500, {"msg": "boom"})
+
+        doc = {
+            "dsl_version": 1,
+            "config": {"fail_fast": True},
+            "steps": [
+                {"id": "a", "name": "a", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/a"},
+                 "assert": [{"type": "status_code", "operator": "eq", "expected": 200}]},
+                {"id": "b", "name": "b", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/b"}},
+                {"id": "c", "name": "c", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/c"}},
+            ],
+        }
+        summary = await execute(parse_dsl(doc), make_context(sink, handler))
+
+        assert summary.status == "failed"
+        assert (summary.total_steps, summary.failed, summary.skipped) == (3, 1, 2)
+        assert [r.status for r in sink.results] == ["failed", "skipped", "skipped"]
+        assert "fail_fast" in sink.results[1].error_message
+        assert "fail_fast" in sink.results[2].error_message
+
+    async def test_without_fail_fast_all_steps_run(self, sink: InMemorySink) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return json_response(500)
+
+        doc = {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {"id": "a", "name": "a", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/a"},
+                 "assert": [{"type": "status_code", "operator": "eq", "expected": 200}]},
+                {"id": "b", "name": "b", "type": "http",
+                 "request": {"method": "GET", "url": "https://api.example.com/b"}},
+            ],
+        }
+        summary = await execute(parse_dsl(doc), make_context(sink, handler))
+
+        assert summary.status == "failed"
+        assert [r.status for r in sink.results] == ["failed", "passed"]

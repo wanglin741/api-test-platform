@@ -37,8 +37,8 @@ def upgrade() -> None:
     sa.Column('summary', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.CheckConstraint("status IN ('pending', 'running', 'stopping', 'stopped', 'success', 'failed', 'error')", name=op.f('ck_run_ck_run_status')),
-    sa.CheckConstraint("trigger_mode IN ('manual', 'schedule', 'openapi', 'ci')", name=op.f('ck_run_ck_run_trigger_mode')),
+    sa.CheckConstraint("status IN ('pending', 'running', 'stopping', 'stopped', 'success', 'failed', 'error')", name=op.f('ck_run_status')),
+    sa.CheckConstraint("trigger_mode IN ('manual', 'schedule', 'openapi', 'ci')", name=op.f('ck_run_trigger_mode')),
     sa.ForeignKeyConstraint(['case_id'], ['test_case.id'], name=op.f('fk_run_case_id_test_case')),
     sa.ForeignKeyConstraint(['environment_id'], ['environment.id'], name=op.f('fk_run_environment_id_environment')),
     sa.ForeignKeyConstraint(['project_id'], ['project.id'], name=op.f('fk_run_project_id_project')),
@@ -75,7 +75,7 @@ def upgrade() -> None:
     sa.Column('error_message', sa.Text(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.CheckConstraint("status IN ('passed', 'failed', 'error', 'skipped')", name=op.f('ck_run_step_result_ck_run_step_result_status')),
+    sa.CheckConstraint("status IN ('passed', 'failed', 'error', 'skipped')", name=op.f('ck_run_step_result_status')),
     sa.ForeignKeyConstraint(['run_id'], ['run.id'], name=op.f('fk_run_step_result_run_id_run')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_run_step_result'))
     )

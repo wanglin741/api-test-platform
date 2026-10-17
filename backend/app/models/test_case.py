@@ -15,7 +15,8 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin, fk_column, pk
 
 class TestCase(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "test_case"
-    __table_args__ = (CheckConstraint("priority IN ('P0', 'P1', 'P2', 'P3')", name="ck_test_case_priority"),)
+    # name 走 naming convention 前缀:ck_%(table_name)s_%(constraint_name)s → ck_test_case_priority
+    __table_args__ = (CheckConstraint("priority IN ('P0', 'P1', 'P2', 'P3')", name="priority"),)
 
     id: Mapped[int] = pk()
     project_id: Mapped[int] = fk_column("project")

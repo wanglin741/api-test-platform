@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1.common import get_project_or_404
 from app.core.errors import ConflictError, not_found
 from app.models import Environment, Project, User
 from app.schemas.resources import EnvironmentCreate, EnvironmentOut, EnvironmentUpdate
@@ -18,7 +19,7 @@ async def _get_environment_or_404(
 ) -> Environment:
     result = await session.execute(
         select(Environment, Project).join(Project, Environment.project_id == Project.id).where(
-            Environment.id == environment_id, Environment.deleted_at.is_(None)
+            Environment.id == environment_id, Environment.alive()
         )
     )
     row = result.first()
@@ -30,13 +31,6 @@ async def _get_environment_or_404(
     return environment
 
 
-async def _get_project_or_404(session: AsyncSession, project_id: int) -> Project:
-    project = await session.get(Project, project_id)
-    if project is None or project.deleted_at is not None:
-        raise not_found("project", project_id)
-    return project
-
-
 @project_router.post("", status_code=201, response_model=EnvironmentOut)
 async def create_environment(
     project_id: int,
@@ -44,7 +38,7 @@ async def create_environment(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Environment:
-    await _get_project_or_404(session, project_id)
+    await get_project_or_404(session, project_id)
     # 表级 UNIQUE (project_id, name) 含软删行 —— 已删环境的名额不释放,与数据库约束保持一致
     conflict = await session.execute(
         select(Environment.id).where(
@@ -71,10 +65,10 @@ async def list_environments(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[Environment]:
-    await _get_project_or_404(session, project_id)
+    await get_project_or_404(session, project_id)
     result = await session.execute(
         select(Environment)
-        .where(Environment.project_id == project_id, Environment.deleted_at.is_(None))
+        .where(Environment.project_id == project_id, Environment.alive())
         .order_by(Environment.sort_order, Environment.id)
     )
     return list(result.scalars())

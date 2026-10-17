@@ -206,3 +206,66 @@ class TestJsonpathListValue:
             1.0,
         )
         assert r.passed is True
+
+
+# 3 类型 × 8 操作符完整矩阵(设计文档《执行引擎》§12)。
+# 每行: (断言类型, expression, 操作符, 通过侧期望, 失败侧期望, 通过侧结果, 失败侧结果)
+# actual 取值由类型决定:status_code=200 / response_time_ms=42.5 / $.data.score=88
+MATRIX = [
+    # eq / ne
+    ("status_code", None, "eq", 200, 201, True, False),
+    ("response_time_ms", None, "eq", 42.5, 43, True, False),
+    ("jsonpath", "$.data.score", "eq", 88, 89, True, False),
+    ("status_code", None, "ne", 201, 200, True, False),
+    ("response_time_ms", None, "ne", 43, 42.5, True, False),
+    ("jsonpath", "$.data.score", "ne", 89, 88, True, False),
+    # gt / gte / lt / lte
+    ("status_code", None, "gt", 199, 200, True, False),
+    ("response_time_ms", None, "gt", 42, 42.5, True, False),
+    ("jsonpath", "$.data.score", "gt", 87, 88, True, False),
+    ("status_code", None, "gte", 200, 201, True, False),
+    ("response_time_ms", None, "gte", 42.5, 43, True, False),
+    ("jsonpath", "$.data.score", "gte", 88, 89, True, False),
+    ("status_code", None, "lt", 201, 200, True, False),
+    ("response_time_ms", None, "lt", 43, 42.5, True, False),
+    ("jsonpath", "$.data.score", "lt", 89, 88, True, False),
+    ("status_code", None, "lte", 200, 199, True, False),
+    ("response_time_ms", None, "lte", 42.5, 42, True, False),
+    ("jsonpath", "$.data.score", "lte", 88, 87, True, False),
+    # contains:actual 不是容器 → 恒失败(jsonpath 行换 tags 数组才有容器语义)
+    ("status_code", None, "contains", 0, 0, False, False),
+    ("response_time_ms", None, "contains", 42.5, 42.5, False, False),
+    ("jsonpath", "$.data.tags", "contains", "a", "z", True, False),
+    # regex_match:actual 先转字符串再 search
+    ("status_code", None, "regex_match", "^2", "^3", True, False),
+    ("response_time_ms", None, "regex_match", "^42", "^43", True, False),
+    ("jsonpath", "$.data.score", "regex_match", "^8", "^9", True, False),
+]
+
+
+class TestTypeOperatorMatrix:
+    @pytest.mark.parametrize(
+        ("assert_type", "expression", "operator", "pass_expected", "fail_expected",
+         "pass_passes", "fail_passes"),
+        MATRIX,
+    )
+    def test_matrix(
+        self,
+        assert_type: str,
+        expression: str | None,
+        operator: str,
+        pass_expected: object,
+        fail_expected: object,
+        pass_passes: bool,
+        fail_passes: bool,
+    ) -> None:
+        kwargs: dict = {"type": assert_type, "operator": operator}
+        if expression is not None:
+            kwargs["expression"] = expression
+        duration = 42.5
+
+        r_pass = evaluate(assert_spec(expected=pass_expected, **kwargs), JSON_RESPONSE, duration)
+        r_fail = evaluate(assert_spec(expected=fail_expected, **kwargs), JSON_RESPONSE, duration)
+
+        assert r_pass.passed is pass_passes
+        assert r_fail.passed is fail_passes

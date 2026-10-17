@@ -7,9 +7,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import ConflictError, not_found
-from app.models import Environment, Project, Run, RunStepResult, TestCase, User
+from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
 from app.schemas.runs import (
     CancelAck,
     RequestSnapshotOut,
@@ -43,9 +44,7 @@ async def trigger_run(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> RunTriggered:
-    project = await session.get(Project, project_id)
-    if project is None or project.deleted_at is not None:
-        raise not_found("project", project_id)
+    await get_project_or_404(session, project_id)
 
     case = await session.get(TestCase, payload.case_id)
     if (
@@ -114,13 +113,36 @@ async def list_run_steps(
     user: User = Depends(get_current_user),
 ) -> StepList:
     await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
+    # 这张表禁止 SELECT *(数据模型 §9):显式列出明细需要的列,不抱走整行
+    columns = (
+        RunStepResult.id,
+        RunStepResult.step_index,
+        RunStepResult.step_name,
+        RunStepResult.step_type,
+        RunStepResult.status,
+        RunStepResult.duration_ms,
+        RunStepResult.request_method,
+        RunStepResult.request_url,
+        RunStepResult.request_headers,
+        RunStepResult.request_body,
+        RunStepResult.response_status,
+        RunStepResult.response_headers,
+        RunStepResult.response_size,
+        RunStepResult.response_body,
+        RunStepResult.response_body_truncated,
+        RunStepResult.extracted_variables,
+        RunStepResult.assertions,
+        RunStepResult.assertion_total,
+        RunStepResult.assertion_passed,
+        RunStepResult.error_message,
+    )
     result = await session.execute(
-        select(RunStepResult)
+        select(*columns)
         .where(RunStepResult.run_id == run_id)
         .order_by(RunStepResult.step_index)
         .limit(STEPS_HARD_CAP + 1)
     )
-    rows = list(result.scalars())
+    rows = result.all()
     truncated = len(rows) > STEPS_HARD_CAP
     rows = rows[:STEPS_HARD_CAP]
 
@@ -175,7 +197,7 @@ async def cancel_run(
     import redis as redis_py
 
     run = await _get_run_or_404(session, run_id)
-    if run.status in ("success", "failed", "error", "stopped"):
+    if run.status in RUN_TERMINAL_STATUSES:
         raise ConflictError(
             message="执行已结束,无法取消",
             code="run_already_finished",

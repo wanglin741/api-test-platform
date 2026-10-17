@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.api.v1.common import get_project_or_404
 from app.core.errors import ValidationFailedError, not_found
 from app.engine.dsl import parse_dsl
 from app.models import Project, TestCase, TestCaseVersion, User
@@ -62,13 +63,6 @@ def _detail(case: TestCase, version: TestCaseVersion) -> CaseDetail:
     )
 
 
-async def _get_project_or_404(session: AsyncSession, project_id: int) -> Project:
-    project = await session.get(Project, project_id)
-    if project is None or project.deleted_at is not None:
-        raise not_found("project", project_id)
-    return project
-
-
 @project_router.post("", status_code=201, response_model=CaseDetail)
 async def create_case(
     project_id: int,
@@ -76,7 +70,7 @@ async def create_case(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> CaseDetail:
-    await _get_project_or_404(session, project_id)
+    await get_project_or_404(session, project_id)
     _validate_dsl(payload.dsl)
     case = TestCase(
         project_id=project_id,
@@ -113,7 +107,7 @@ async def list_cases(
 ) -> CasePage:
     if page_size > 100:  # 超限钳制而非报错,保住客户端「一页拉全部」的写法
         page_size = 100
-    conditions = [TestCase.project_id == project_id, TestCase.deleted_at.is_(None)]
+    conditions = [TestCase.project_id == project_id, TestCase.alive()]
     if keyword:
         conditions.append(TestCase.name.ilike(f"%{keyword}%"))
     total = await session.scalar(select(func.count()).select_from(TestCase).where(*conditions))

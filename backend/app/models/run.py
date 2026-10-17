@@ -31,11 +31,12 @@ RUN_TERMINAL_STATUSES = ("success", "failed", "error", "stopped")
 class Run(Base, TimestampMixin):
     __tablename__ = "run"
     __table_args__ = (
+        # name 走 naming convention 前缀:ck_%(table_name)s_%(constraint_name)s → ck_run_status
         CheckConstraint(
             "status IN ('pending', 'running', 'stopping', 'stopped', 'success', 'failed', 'error')",
-            name="ck_run_status",
+            name="status",
         ),
-        CheckConstraint("trigger_mode IN ('manual', 'schedule', 'openapi', 'ci')", name="ck_run_trigger_mode"),
+        CheckConstraint("trigger_mode IN ('manual', 'schedule', 'openapi', 'ci')", name="trigger_mode"),
         Index("ix_run_project_id_created_at", "project_id", "created_at"),
         Index("ix_run_status", "status"),
         Index("ix_run_celery_task_id", "celery_task_id"),
@@ -63,7 +64,7 @@ class Run(Base, TimestampMixin):
 class RunStepResult(Base, TimestampMixin):
     __tablename__ = "run_step_result"
     __table_args__ = (
-        CheckConstraint("status IN ('passed', 'failed', 'error', 'skipped')", name="ck_run_step_result_status"),
+        CheckConstraint("status IN ('passed', 'failed', 'error', 'skipped')", name="status"),
         Index("ix_run_step_result_run_id_step_index", "run_id", "step_index"),
         Index("ix_run_step_result_created_at", "created_at"),
     )

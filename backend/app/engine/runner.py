@@ -29,11 +29,20 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
         env_prefixes=context.env_prefixes,
     )
 
-    client = context.http_client_factory()
+    # verify_ssl 是步骤级开关,httpx 的 verify 只能挂在整个 client 上:
+    # 按 flag 缓存,分别创建与关闭
+    clients: dict[bool, httpx.AsyncClient] = {}
+
+    def _client_for(verify: bool) -> httpx.AsyncClient:
+        if verify not in clients:
+            clients[verify] = context.http_client_factory(verify=verify)
+        return clients[verify]
+
     start = time.perf_counter()
     results: list[StepResult] = []
     cancelled = False
     timed_out = False
+    fail_fast_hit = False
     try:
         context.publisher.publish("run.started", {"total_steps": len(dsl.steps)})
         for index, step in enumerate(dsl.steps):
@@ -54,11 +63,22 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
                     step_id=step.id, step_name=step.name, step_index=index,
                     status="skipped", error_message=reason,
                 )
+            elif fail_fast_hit:
+                result = StepResult(
+                    step_id=step.id, step_name=step.name, step_index=index,
+                    status="skipped", error_message="fail_fast:前序步骤失败",
+                )
             else:
                 result = await run_http_step(
-                    step, scope, context, client, dsl.config.timeout_ms
+                    step, scope, context, _client_for(step.request.verify_ssl),
+                    dsl.config.timeout_ms,
                 )
                 result.step_index = index
+                if (
+                    dsl.config.fail_fast
+                    and result.status in ("failed", "error")
+                ):
+                    fail_fast_hit = True
 
             results.append(result)
             # 每步立即回调,不批量缓冲(§11)—— 长跑期间轮询可见部分结果
@@ -68,7 +88,8 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
                 {"step_id": step.id, "index": index, "status": result.status},
             )
     finally:
-        await client.aclose()
+        for client in clients.values():
+            await client.aclose()
 
     duration_ms = (time.perf_counter() - start) * 1000
     summary = _summarize(results, duration_ms, cancelled=cancelled, timed_out=timed_out)

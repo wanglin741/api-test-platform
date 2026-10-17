@@ -10,6 +10,7 @@ import datetime
 
 from sqlalchemy import BigInteger, DateTime, ForeignKey, MetaData, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column
+from sqlalchemy.sql.elements import ColumnElement
 
 NAMING_CONVENTION: dict[str, str] = {
     "ix": "ix_%(column_0_label)s",
@@ -35,11 +36,19 @@ class TimestampMixin:
 
 
 class SoftDeleteMixin:
-    """deleted_at 非空即视为已删除。"""
+    """deleted_at 非空即视为已删除。
+
+    查询必须经 alive() 取「未删」谓词,不允许在 service/路由手写
+    deleted_at 条件 —— 漏一处就是数据泄漏(数据模型文档 §1)。
+    """
 
     @declared_attr
     def deleted_at(cls) -> Mapped[datetime.datetime | None]:
         return mapped_column(DateTime(timezone=True), nullable=True)
+
+    @classmethod
+    def alive(cls) -> ColumnElement[bool]:
+        return cls.deleted_at.is_(None)
 
 
 def pk() -> Mapped[int]:

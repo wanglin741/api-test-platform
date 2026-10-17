@@ -22,7 +22,7 @@ def make_context(
 ) -> EngineContext:
     return EngineContext(
         sink=sink,
-        http_client_factory=lambda: make_client(handler),
+        http_client_factory=lambda verify=True: make_client(handler),
         **kwargs,
     )
 
