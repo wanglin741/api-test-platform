@@ -38,7 +38,7 @@ app.include_router(api_router, prefix="/api/v1")
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
-        content=_error_body(exc.code, exc.message, exc.details),
+        content=jsonable_encoder(_error_body(exc.code, exc.message, exc.details)),
     )
 
 

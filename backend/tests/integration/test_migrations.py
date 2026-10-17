@@ -26,6 +26,8 @@ def test_migration_replay(database: None) -> None:
             "variable",
             "test_case",
             "test_case_version",
+            "run",
+            "run_step_result",
             "alembic_version",
         } <= tables
         # 重放后种子用户必须存在(get_current_user 依赖它)

@@ -1,0 +1,122 @@
+"""执行触发 / 状态查询 / 取消。执行结果查询的完整报告端点在 T9。"""
+
+import uuid
+
+from fastapi import APIRouter, Depends, Response
+from sqlalchemy import func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.api.deps import get_current_user, get_db
+from app.core.config import get_settings
+from app.core.errors import ConflictError, not_found
+from app.models import Environment, Project, Run, TestCase, User
+from app.schemas.runs import CancelAck, RunCreate, RunOut, RunTriggered
+from app.tasks.engine_tasks import execute_run
+
+router = APIRouter(prefix="/runs", tags=["runs"])
+project_router = APIRouter(prefix="/projects/{project_id}/runs", tags=["runs"])
+
+
+async def _get_run_or_404(session: AsyncSession, run_id: uuid.UUID) -> Run:
+    run = await session.get(Run, run_id)
+    if run is None:
+        raise not_found("run", run_id)
+    return run
+
+
+@project_router.post("", status_code=202, response_model=RunTriggered)
+async def trigger_run(
+    project_id: int,
+    payload: RunCreate,
+    response: Response,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RunTriggered:
+    project = await session.get(Project, project_id)
+    if project is None or project.deleted_at is not None:
+        raise not_found("project", project_id)
+
+    case = await session.get(TestCase, payload.case_id)
+    if (
+        case is None
+        or case.deleted_at is not None
+        or case.project_id != project_id
+    ):
+        raise not_found("case", payload.case_id)  # 归属不符一律 404,不区分「不存在」与「不属于」
+
+    environment = await session.get(Environment, payload.environment_id)
+    if (
+        environment is None
+        or environment.deleted_at is not None
+        or environment.project_id != project_id
+    ):
+        raise not_found("environment", payload.environment_id)
+
+    run = Run(
+        project_id=project_id,
+        case_id=case.id,
+        case_version=case.current_version,  # 锁定版本:改用例不影响旧报告还原
+        environment_id=environment.id,
+        trigger_mode="manual",
+        triggered_by=user.id,
+        status="pending",
+    )
+    session.add(run)
+    # 先提交再投递:worker(真实或 eager)用独立会话读 run,未提交的插入对它不可见
+    await session.commit()
+
+    task = execute_run.delay(str(run.id))
+    run.celery_task_id = task.id
+    await session.flush()
+
+    response.headers["Location"] = f"/api/v1/runs/{run.id}"
+    return RunTriggered(run_id=run.id, status=run.status)
+
+
+@router.get("/{run_id}", response_model=RunOut)
+async def get_run(
+    run_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RunOut:
+    run = await _get_run_or_404(session, run_id)
+    return RunOut(
+        run_id=run.id,
+        project_id=run.project_id,
+        case_id=run.case_id,
+        case_version=run.case_version,
+        environment_id=run.environment_id,
+        trigger_mode=run.trigger_mode,
+        status=run.status,
+        duration_ms=run.duration_ms,
+        summary=run.summary,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
+
+
+@router.post("/{run_id}/cancel", response_model=CancelAck)
+async def cancel_run(
+    run_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> CancelAck:
+    import redis as redis_py
+
+    run = await _get_run_or_404(session, run_id)
+    if run.status in ("success", "failed", "error", "stopped"):
+        raise ConflictError(
+            message="执行已结束,无法取消",
+            code="run_already_finished",
+            details={"run_id": str(run.id), "status": run.status},
+        )
+
+    # D3 顺序:先写带外取消标志,再改状态,避免 worker 读到空标志的竞态
+    client = redis_py.Redis.from_url(get_settings().redis_url)
+    client.set(f"run:cancel:{run.id}", 1, ex=3600)
+
+    run.cancel_requested_at = func.now()
+    run.status = "stopped" if run.status == "pending" else "stopping"
+    await session.flush()
+    return CancelAck(run_id=run.id, status=run.status)
