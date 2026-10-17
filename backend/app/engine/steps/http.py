@@ -14,8 +14,10 @@ from urllib.parse import urlencode
 import httpx
 import orjson
 
+from app.engine.assertions import evaluate_all
 from app.engine.context import EngineContext
 from app.engine.dsl import RequestBody, StepSpec
+from app.engine.extractors import ExtractionFailure, extract_value
 from app.engine.results import RequestSnapshot, ResponseSnapshot, StepResult
 from app.engine.variables import VariableResolutionError, VariableScope, stringify
 
@@ -132,4 +134,24 @@ async def run_http_step(
         body=response.text,
     )
     result.request.body = snapshot_body
+
+    # ── 提取(断言执行前,§4)──────────────────────────────────────
+    extraction_errors: list[str] = []
+    for extractor in step.extract:
+        try:
+            value = extract_value(extractor, result.response)
+            scope.set(extractor.name, value)
+            result.extracted[extractor.name] = value
+        except ExtractionFailure as exc:
+            if extractor.required:
+                extraction_errors.append(str(exc))
+            # required: false → 变量不注入,后续引用它的步骤会 skipped
+
+    # ── 断言:全部执行,不短路(§5)────────────────────────────────
+    result.assertions = evaluate_all(step.assertions, result.response, result.duration_ms)
+
+    failures = extraction_errors + [a.message for a in result.assertions if not a.passed]
+    if failures:
+        result.status = "failed"
+        result.error_message = "; ".join(failures)
     return result
