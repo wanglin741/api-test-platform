@@ -1,7 +1,36 @@
 [project]
 name = "backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "接口自动化测试平台后端"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "alembic>=1.20.0",
+    "asyncpg>=0.32.0",
+    "celery[redis]>=5.6.3",
+    "fastapi>=0.143.3",
+    "httpx>=0.28.1",
+    "jsonpath-ng>=1.11.0",
+    "orjson>=3.13.0",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.16.0",
+    "redis>=6.4.0",
+    "sqlalchemy[asyncio]>=2.1.5",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.15",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+markers = [
+    "e2e: 端到端测试(真实 socket / 真实服务),默认排除,用 -m e2e 单独跑",
+]
+addopts = "-m 'not e2e'"

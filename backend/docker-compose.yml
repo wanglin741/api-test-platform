@@ -1,0 +1,36 @@
+# 开发环境基础设施。应用进程本地跑(uv run),这里只放 PG 与 Redis。
+# 用法:cd backend && docker compose up -d
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-apitest}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apitest}
+      POSTGRES_DB: ${POSTGRES_DB:-apitest}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PG18+ 镜像要求数据挂载点是 /var/lib/postgresql(内部自动按主版本建子目录),
+      # 以便 pg_upgrade 原地升级;挂旧的 .../data 路径容器会直接拒绝启动
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apitest}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  redisdata:
