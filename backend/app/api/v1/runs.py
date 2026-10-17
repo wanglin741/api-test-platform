@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +16,7 @@ from app.schemas.runs import (
     RequestSnapshotOut,
     ResponseSnapshotOut,
     RunCreate,
+    RunList,
     RunOut,
     RunTriggered,
     StepList,
@@ -81,6 +82,49 @@ async def trigger_run(
 
     response.headers["Location"] = f"/api/v1/runs/{run.id}"
     return RunTriggered(run_id=run.id, status=run.status)
+
+
+@project_router.get("", response_model=RunList)
+async def list_project_runs(
+    project_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> RunList:
+    await get_project_or_404(session, project_id)
+    total = await session.scalar(
+        select(func.count()).select_from(Run).where(Run.project_id == project_id)
+    )
+    rows = await session.scalars(
+        select(Run)
+        .where(Run.project_id == project_id)
+        .order_by(Run.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    return RunList(
+        items=[
+            RunOut(
+                run_id=r.id,
+                project_id=r.project_id,
+                case_id=r.case_id,
+                case_version=r.case_version,
+                environment_id=r.environment_id,
+                trigger_mode=r.trigger_mode,
+                status=r.status,
+                duration_ms=r.duration_ms,
+                summary=r.summary,
+                created_at=r.created_at,
+                started_at=r.started_at,
+                finished_at=r.finished_at,
+            )
+            for r in rows
+        ],
+        total=total or 0,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{run_id}", response_model=RunOut)
