@@ -23,6 +23,25 @@ export const useRunStore = defineStore('run', () => {
   const stepsTruncated = ref(false)
   const polling = ref(false)
 
+  // 报告列表页(offset 分页,created_at 倒序由后端保证)
+  const runItems = ref<RunOut[]>([])
+  const total = ref(0)
+  const offset = ref(0)
+
+  async function listRuns(
+    projectId: number,
+    client: ApiClient = api,
+    toOffset = 0,
+    limit = 20,
+  ): Promise<void> {
+    const { data } = await client.GET('/api/v1/projects/{project_id}/runs', {
+      params: { path: { project_id: projectId }, query: { limit, offset: toOffset } },
+    })
+    runItems.value = data?.items ?? []
+    total.value = data?.total ?? 0
+    offset.value = toOffset
+  }
+
   async function trigger(
     projectId: number,
     caseId: number,
@@ -96,6 +115,10 @@ export const useRunStore = defineStore('run', () => {
     steps,
     stepsTruncated,
     polling,
+    runItems,
+    total,
+    offset,
+    listRuns,
     trigger,
     loadRun,
     loadSteps,

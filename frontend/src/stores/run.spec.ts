@@ -130,6 +130,26 @@ describe('runStore', () => {
     expect(store.run?.status).toBe('stopping')
   })
 
+  it('listRuns:offset 分页拉取报告列表', async () => {
+    setActivePinia(createPinia())
+    const client = mockClient({
+      GET: vi.fn(async () => okResponse({ items: [RUN_RUNNING], total: 21, limit: 20, offset: 20 })),
+    })
+    const store = useRunStore()
+
+    await store.listRuns(1, client, 20)
+
+    expect(store.runItems).toEqual([RUN_RUNNING])
+    expect(store.total).toBe(21)
+    expect(store.offset).toBe(20)
+    const [path, opts] = (client.GET as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { params: { query: Record<string, number> } },
+    ]
+    expect(path).toBe('/api/v1/projects/{project_id}/runs')
+    expect(opts.params.query).toEqual({ limit: 20, offset: 20 })
+  })
+
   it('lastEnvId:按项目记住上次环境', () => {
     setActivePinia(createPinia())
     const store = useRunStore()
