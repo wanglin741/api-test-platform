@@ -6,7 +6,10 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { api, ApiError } from '@/api/client'
 import DslEditor from '@/components/DslEditor.vue'
+import TriggerDialog from '@/components/TriggerDialog.vue'
 import { useCaseStore } from '@/stores/case'
+import { useEnvironmentStore } from '@/stores/environment'
+import { useProjectStore } from '@/stores/project'
 
 import type { components } from '@/api/schema'
 
@@ -20,6 +23,22 @@ interface DslError {
 const route = useRoute()
 const router = useRouter()
 const caseStore = useCaseStore()
+const projectStore = useProjectStore()
+const environmentStore = useEnvironmentStore()
+
+// ── 执行 ─────────────────────────────────────────────────────────
+const triggerVisible = ref(false)
+
+async function openTrigger() {
+  if (projectStore.currentId === null) return
+  // 弹窗默认环境依赖环境列表;打开前确保已加载
+  await environmentStore.load(projectStore.currentId, api)
+  triggerVisible.value = true
+}
+
+function onTriggered(runId: string) {
+  router.push(`/runs/${runId}`)
+}
 
 const detail = ref<CaseDetail | null>(null)
 const name = ref('')
@@ -93,7 +112,10 @@ async function save() {
       <el-input v-model="name" class="name-input" maxlength="128" />
       <el-tag class="version" type="info">v{{ detail.current_version }}</el-tag>
       <el-button class="save-btn" type="primary" :loading="saving" @click="save">保存</el-button>
+      <el-button class="trigger-btn" type="success" @click="openTrigger">执行</el-button>
     </div>
+
+    <TriggerDialog v-model="triggerVisible" :case-id="detail.id" @triggered="onTriggered" />
 
     <el-alert v-if="syntaxError" class="syntax-error" type="error" :closable="false"
       :title="syntaxError" />
