@@ -6,15 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Two independent packages with separate toolchains and **no root-level orchestration** — every command runs from inside its package directory.
 
-- `backend/` — Python 3.11, uv-managed. A bare scaffold: `pyproject.toml` declares `dependencies = []`, so there is no web framework, no routes, and no persistence layer yet. `main.py` prints a greeting; `app/` and `app/api/` are empty packages.
-- `frontend/` — Vue 3 + TypeScript + Vite + Pinia + Vue Router. Also a scaffold: `src/router/index.ts` registers zero routes, and there is no API client.
+- `backend/` — Python 3.11, uv-managed. FastAPI + SQLAlchemy async + Celery (Redis broker) + PostgreSQL 18. The MVP loop (projects/environments/variables/cases CRUD, DSL execution engine in `app/engine/`, run reports) is implemented; see `docs/design/` for the architecture.
+- `frontend/` — Vue 3 + TypeScript + Vite + Pinia + Vue Router + Element Plus. Admin layout with routes; API types generated from the backend's OpenAPI schema (`npm run gen:api`).
 - `docs/` — design documentation. **This is the source of truth for what to build.**
-
-Both packages are placeholder shells. Anything beyond the commands below is still to be built, so confirm a dependency or directory exists before assuming it does.
 
 ## Documentation
 
-The platform is **designed but not implemented**. Before writing code, read [docs/README.md](docs/README.md) for the index; the design docs there specify the target architecture, data model, execution engine, and API — follow them rather than inventing an alternative.
+Before writing code, read [docs/README.md](docs/README.md) for the index; the design docs there specify the target architecture, data model, execution engine, and API — follow them rather than inventing an alternative.
 
 All documentation lives under `docs/`, in a subdirectory by type (`research/`, `design/`, `api/`, `ops/`, `adr/`, `guide/`). Add new docs to the matching directory and link them from `docs/README.md`. Do not write docs elsewhere in the repo.
 
@@ -26,31 +24,37 @@ Design docs are updated **in the same change** as the code they describe.
 
 ```sh
 cd backend
-uv run main.py          # run the entrypoint
-uv sync                 # install/refresh dependencies into backend/.venv
+uv run uvicorn app.main:app --port 8000   # API server (needs compose services up)
+uv run celery -A app.tasks.celery_app worker -Q execution,default -P solo  # worker
+uv run alembic upgrade head             # apply migrations (PYTHONUTF8=1 on Windows)
+uv run python scripts/seed.py           # reset business tables to the demo dataset
+uv sync                                 # install/refresh dependencies into backend/.venv
 ```
 
 `uv run` and `uv sync` create `backend/.venv` on first use (gitignored). **Run uv from `backend/`** — from the repo root it finds no `pyproject.toml` and falls back to an ephemeral environment instead of the project's.
-
-There is no `uv.lock` in git yet; it appears after the first sync and should be committed.
 
 ### frontend/
 
 ```sh
 cd frontend
 npm install
-npm run dev             # Vite dev server
+npm run dev             # Vite dev server (proxies /api to 127.0.0.1:8000)
 npm run build           # type-check + vite build, in parallel
 npm run type-check      # vue-tsc --build
 npm run lint            # oxlint --fix, then eslint --fix (sequential)
 npm run format          # prettier over src/ only
+npm run test            # vitest run
+npm run gen:api         # regenerate src/api/schema.d.ts from a running backend
 ```
 
 Use `npm run type-check`, not `tsc` — plain `tsc` cannot resolve types across `.vue` imports.
 
+`.npmrc` sets `legacy-peer-deps=true`: openapi-typescript 7.x peers on TS 5 while the project uses TS 6 (the generator CLI is decoupled from the host TS; verified working).
+
 ## Testing
 
-**Neither package has a test runner installed.** No pytest on the backend, no Vitest on the frontend. There is no `npm test` script and no single-test command to reach for. Adding tests means choosing and installing a runner first.
+- **backend**: pytest (`uv run pytest`) — unit tests in `tests/engine/` (pure, MockTransport), integration tests in `tests/integration/` (real PostgreSQL via compose, eager Celery), e2e in `tests/e2e/` (real sockets; excluded by default, run with `-m e2e`).
+- **frontend**: Vitest (`npm run test`) — tests live next to source as `*.spec.ts`. Two seams (see `docs/design/前端设计.md` §7): Pinia stores with an injected mock API client, and key component mounts.
 
 ## Conventions
 
