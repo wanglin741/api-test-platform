@@ -22,24 +22,40 @@ function okResponse(body: unknown) {
 }
 
 const ENV_A = {
-  id: 1, project_id: 1, name: 'dev', description: null, base_url: 'http://dev',
-  default_headers: {}, auth: null, is_default: false, sort_order: 0,
-  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  id: 1,
+  project_id: 1,
+  name: 'dev',
+  description: null,
+  base_url: 'http://dev',
+  default_headers: {},
+  auth: null,
+  is_default: false,
+  sort_order: 0,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
 }
 const ENV_B = {
-  id: 2, project_id: 1, name: 'staging', description: null, base_url: 'http://staging',
-  default_headers: {}, auth: null, is_default: true, sort_order: 1,
-  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  id: 2,
+  project_id: 1,
+  name: 'staging',
+  description: null,
+  base_url: 'http://staging',
+  default_headers: {},
+  auth: null,
+  is_default: true,
+  sort_order: 1,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
 }
 
 /** 环境列表由父页面负责加载;测试直接种进 store。 */
-async function mountDialog() {
+async function mountDialog(props: Record<string, unknown> = {}) {
   setActivePinia(createPinia())
   useProjectStore().currentId = 1
   useEnvironmentStore().items = [ENV_A, ENV_B]
   const wrapper = mount(TriggerDialog, {
     global: { plugins: [ElementPlus] },
-    props: { caseId: 7, modelValue: true },
+    props: { caseId: 7, modelValue: true, ...props },
   })
   await flushPromises()
   return wrapper
@@ -52,6 +68,14 @@ describe('TriggerDialog', () => {
     await mountDialog()
 
     expect(useEnvironmentStore().selectedId).toBe(1)
+  })
+
+  it('「再次执行」指定环境时,预选优先于上次记录', async () => {
+    localStorage.setItem('apitest.last-env-1', '1')
+
+    await mountDialog({ environmentId: 2 })
+
+    expect(useEnvironmentStore().selectedId).toBe(2)
   })
 
   it('无历史记录时选 is_default 环境', async () => {

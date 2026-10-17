@@ -1,23 +1,26 @@
 """执行触发 / 状态查询 / 取消。执行结果查询的完整报告端点在 T9。"""
 
+import base64
+import datetime
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, Query, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
-from app.core.errors import ConflictError, not_found
+from app.core.errors import ConflictError, ValidationFailedError, not_found
 from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
 from app.schemas.runs import (
     CancelAck,
     RequestSnapshotOut,
     ResponseSnapshotOut,
     RunCreate,
-    RunList,
     RunOut,
+    RunPage,
     RunTriggered,
     StepList,
     StepOut,
@@ -35,6 +38,39 @@ async def _get_run_or_404(session: AsyncSession, run_id: uuid.UUID) -> Run:
     if run is None:
         raise not_found("run", run_id)
     return run
+
+
+def _run_out(run: Run) -> RunOut:
+    return RunOut(
+        run_id=run.id,
+        project_id=run.project_id,
+        case_id=run.case_id,
+        case_version=run.case_version,
+        environment_id=run.environment_id,
+        trigger_mode=run.trigger_mode,
+        status=run.status,
+        duration_ms=run.duration_ms,
+        summary=run.summary,
+        created_at=run.created_at,
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+    )
+
+
+def _encode_cursor(run: Run) -> str:
+    raw = json.dumps({"c": run.created_at.isoformat(), "i": str(run.id)})
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime.datetime, uuid.UUID]:
+    try:
+        data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        return datetime.datetime.fromisoformat(data["c"]), uuid.UUID(data["i"])
+    except Exception as exc:
+        raise ValidationFailedError(
+            message="无效的执行列表游标",
+            code="invalid_cursor",
+        ) from exc
 
 
 @project_router.post("", status_code=202, response_model=RunTriggered)
@@ -84,46 +120,28 @@ async def trigger_run(
     return RunTriggered(run_id=run.id, status=run.status)
 
 
-@project_router.get("", response_model=RunList)
+@project_router.get("", response_model=RunPage)
 async def list_project_runs(
     project_id: int,
     limit: int = Query(default=20, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(default=None),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
-) -> RunList:
+) -> RunPage:
     await get_project_or_404(session, project_id)
-    total = await session.scalar(
-        select(func.count()).select_from(Run).where(Run.project_id == project_id)
-    )
-    rows = await session.scalars(
-        select(Run)
-        .where(Run.project_id == project_id)
-        .order_by(Run.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    )
-    return RunList(
-        items=[
-            RunOut(
-                run_id=r.id,
-                project_id=r.project_id,
-                case_id=r.case_id,
-                case_version=r.case_version,
-                environment_id=r.environment_id,
-                trigger_mode=r.trigger_mode,
-                status=r.status,
-                duration_ms=r.duration_ms,
-                summary=r.summary,
-                created_at=r.created_at,
-                started_at=r.started_at,
-                finished_at=r.finished_at,
-            )
-            for r in rows
-        ],
-        total=total or 0,
-        limit=limit,
-        offset=offset,
+    stmt = select(Run).where(Run.project_id == project_id)
+    if cursor is not None:
+        created_at, run_id = _decode_cursor(cursor)
+        # 行值比较同时锚定时间与 id:created_at 相同的相邻行不重不漏
+        stmt = stmt.where(tuple_(Run.created_at, Run.id) < tuple_(created_at, run_id))
+    stmt = stmt.order_by(Run.created_at.desc(), Run.id.desc()).limit(limit + 1)
+    rows = list((await session.scalars(stmt)).all())
+    # 多取一条只为探测「还有下一页」;游标取自本页最后一行
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return RunPage(
+        items=[_run_out(r) for r in rows],
+        next_cursor=_encode_cursor(rows[-1]) if has_more and rows else None,
     )
 
 
@@ -134,20 +152,7 @@ async def get_run(
     user: User = Depends(get_current_user),
 ) -> RunOut:
     run = await _get_run_or_404(session, run_id)
-    return RunOut(
-        run_id=run.id,
-        project_id=run.project_id,
-        case_id=run.case_id,
-        case_version=run.case_version,
-        environment_id=run.environment_id,
-        trigger_mode=run.trigger_mode,
-        status=run.status,
-        duration_ms=run.duration_ms,
-        summary=run.summary,
-        created_at=run.created_at,
-        started_at=run.started_at,
-        finished_at=run.finished_at,
-    )
+    return _run_out(run)
 
 
 @router.get("/{run_id}/steps", response_model=StepList)

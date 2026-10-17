@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowLeft } from '@element-plus/icons-vue'
-import ElMessage from 'element-plus/es/components/message/index'
+import { ElMessage } from 'element-plus'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -8,8 +8,7 @@ import { api, ApiError } from '@/api/client'
 import DslEditor from '@/components/DslEditor.vue'
 import TriggerDialog from '@/components/TriggerDialog.vue'
 import { useCaseStore } from '@/stores/case'
-import { useEnvironmentStore } from '@/stores/environment'
-import { useProjectStore } from '@/stores/project'
+import { useTriggerDialog } from '@/composables/trigger-dialog'
 
 import type { components } from '@/api/schema'
 
@@ -23,22 +22,15 @@ interface DslError {
 const route = useRoute()
 const router = useRouter()
 const caseStore = useCaseStore()
-const projectStore = useProjectStore()
-const environmentStore = useEnvironmentStore()
 
-// ── 执行 ─────────────────────────────────────────────────────────
-const triggerVisible = ref(false)
-
-async function openTrigger() {
-  if (projectStore.currentId === null) return
-  // 弹窗默认环境依赖环境列表;打开前确保已加载
-  await environmentStore.load(projectStore.currentId, api)
-  triggerVisible.value = true
-}
-
-function onTriggered(runId: string) {
-  router.push(`/runs/${runId}`)
-}
+// ── 执行(与报告列表「再次执行」共用接线) ────────────────────────
+const {
+  triggerVisible,
+  triggerCaseId,
+  triggerEnvId,
+  open: openTrigger,
+  onTriggered,
+} = useTriggerDialog()
 
 const detail = ref<CaseDetail | null>(null)
 const name = ref('')
@@ -82,10 +74,15 @@ async function save() {
 
   saving.value = true
   try {
-    const saved = await caseStore.save(caseId, { dsl })
+    const prevVersion = detail.value?.current_version ?? null
+    const saved = await caseStore.save(caseId, { name: name.value.trim(), dsl })
     if (saved) {
       detail.value = saved
-      ElMessage.success(`已保存为 v${saved.current_version}`)
+      ElMessage.success(
+        prevVersion === null || prevVersion === saved.current_version
+          ? `已保存为 v${saved.current_version}`
+          : `已保存:v${prevVersion} → v${saved.current_version}`,
+      )
     }
   } catch (error) {
     // 业务校验(dsl_invalid)明细在编辑器上方回显;其余错误全局拦截器已提示
@@ -115,12 +112,27 @@ async function save() {
       <el-button class="trigger-btn" type="success" @click="openTrigger">执行</el-button>
     </div>
 
-    <TriggerDialog v-model="triggerVisible" :case-id="detail.id" @triggered="onTriggered" />
+    <TriggerDialog
+      v-if="triggerCaseId !== null"
+      v-model="triggerVisible"
+      :case-id="triggerCaseId"
+      :environment-id="triggerEnvId"
+      @triggered="onTriggered"
+    />
 
-    <el-alert v-if="syntaxError" class="syntax-error" type="error" :closable="false"
-      :title="syntaxError" />
-    <el-alert v-if="validationErrors.length" class="validation-errors" type="error"
-      :title="`DSL 校验未通过(共 ${validationErrors.length} 处)`">
+    <el-alert
+      v-if="syntaxError"
+      class="syntax-error"
+      type="error"
+      :closable="false"
+      :title="syntaxError"
+    />
+    <el-alert
+      v-if="validationErrors.length"
+      class="validation-errors"
+      type="error"
+      :title="`DSL 校验未通过(共 ${validationErrors.length} 处)`"
+    >
       <ul>
         <li v-for="(err, i) in validationErrors" :key="i">
           <code>{{ err.loc.join('.') }}</code>

@@ -14,8 +14,16 @@ function okResponse(body: unknown) {
 }
 
 const CASE_A = {
-  id: 1, project_id: 1, name: '登录链路', description: null, priority: 'P0', tags: [],
-  current_version: 2, created_by: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+  id: 1,
+  project_id: 1,
+  name: '登录链路',
+  description: null,
+  priority: 'P0',
+  tags: [],
+  current_version: 2,
+  created_by: 1,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-02T00:00:00Z',
 }
 
 describe('caseStore', () => {
@@ -48,7 +56,9 @@ describe('caseStore', () => {
     const got = await store.loadOne(1, client)
 
     expect(got?.dsl).toEqual({ dsl_version: 1, steps: [] })
-    expect((client.GET as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBe('/api/v1/cases/{case_id}')
+    expect((client.GET as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBe(
+      '/api/v1/cases/{case_id}',
+    )
   })
 
   it('save:PATCH 提交 dsl,返回新版本详情', async () => {

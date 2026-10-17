@@ -1,0 +1,41 @@
+/* 列表页共享布局(用例列表 / 报告列表):行、翻页条、空态。
+   列格数各异,由各视图的 scoped 样式定义 grid-template-columns。 */
+.head,
+.row {
+  display: grid;
+  gap: 8px;
+  padding: 8px 12px;
+  align-items: center;
+}
+
+.head {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.row {
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  cursor: pointer;
+}
+
+.row:hover {
+  background: var(--el-fill-color-light);
+}
+
+.none {
+  color: var(--el-text-color-secondary);
+  padding: 16px 12px;
+}
+
+.pager {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+}
+
+.empty {
+  padding-top: 80px;
+}

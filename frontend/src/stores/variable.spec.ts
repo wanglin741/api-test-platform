@@ -25,7 +25,9 @@ describe('variableStore', () => {
 
     await store.loadProjectVars(1, client)
 
-    expect(store.projectVars).toEqual([{ name: 'timeout', value: '30', is_secret: false, description: null }])
+    expect(store.projectVars).toEqual([
+      { name: 'timeout', value: '30', is_secret: false, description: null },
+    ])
     expect((client.GET as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBe(
       '/api/v1/projects/{project_id}/variables',
     )
@@ -34,13 +36,19 @@ describe('variableStore', () => {
   it('loadEnvVars:取环境级变量', async () => {
     setActivePinia(createPinia())
     const client = mockClient({
-      GET: vi.fn(async () => okResponse([{ id: 3, name: 'password', value: 's3cret', is_secret: true, description: null }])),
+      GET: vi.fn(async () =>
+        okResponse([
+          { id: 3, name: 'password', value: 's3cret', is_secret: true, description: null },
+        ]),
+      ),
     })
     const store = useVariableStore()
 
     await store.loadEnvVars(2, client)
 
-    expect(store.envVars).toEqual([{ name: 'password', value: 's3cret', is_secret: true, description: null }])
+    expect(store.envVars).toEqual([
+      { name: 'password', value: 's3cret', is_secret: true, description: null },
+    ])
     expect((client.GET as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBe(
       '/api/v1/environments/{environment_id}/variables',
     )
@@ -56,7 +64,10 @@ describe('variableStore', () => {
 
     await store.saveProjectVars(1, items, client)
 
-    const [path, opts] = (client.PUT as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { body: unknown }]
+    const [path, opts] = (client.PUT as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { body: unknown },
+    ]
     expect(path).toBe('/api/v1/projects/{project_id}/variables')
     expect(opts.body).toEqual({ items })
   })

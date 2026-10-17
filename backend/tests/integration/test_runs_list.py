@@ -1,12 +1,22 @@
-"""执行列表端点(T10):报告列表页的分页数据源。"""
+"""执行列表端点(T10):报告列表页的分页数据源。游标分页,只支持下一页。"""
 
-LIMIT_DEFAULT = 20
+
+def _dsl(url: str = "http://127.0.0.1:1/unreachable") -> dict:
+    return {
+        "dsl_version": 1,
+        "steps": [
+            {
+                "id": "s1",
+                "name": "step one",
+                "type": "http",
+                "request": {"method": "GET", "url": url},
+            }
+        ],
+    }
 
 
 async def _setup(client, name: str = "列表项目") -> tuple[int, int, int]:
     """建项目 + 环境 + 单步用例,返回 (project_id, env_id, case_id)。"""
-    from tests.integration.test_cases import _dsl
-
     project = (await client.post("/api/v1/projects", json={"name": name})).json()
     env = (
         await client.post(
@@ -16,7 +26,7 @@ async def _setup(client, name: str = "列表项目") -> tuple[int, int, int]:
     ).json()
     resp = await client.post(
         f"/api/v1/projects/{project['id']}/cases",
-        json={"name": "列表用例", "dsl": _dsl(url="http://127.0.0.1:1/unreachable")},
+        json={"name": "列表用例", "dsl": _dsl()},
     )
     assert resp.status_code == 201, resp.text
     return project["id"], env["id"], resp.json()["id"]
@@ -37,18 +47,16 @@ async def test_empty_list(client):
     assert resp.status_code == 200
     body = resp.json()
     assert body["items"] == []
-    assert body["total"] == 0
-    assert body["limit"] == LIMIT_DEFAULT
-    assert body["offset"] == 0
+    assert body["next_cursor"] is None
 
 
-async def test_list_ordered_desc_with_meta(client):
+async def test_list_ordered_desc(client):
     project_id, env_id, case_id = await _setup(client, name="倒序项目")
     ids = [await _trigger(client, project_id, env_id, case_id) for _ in range(3)]
 
     body = (await client.get(f"/api/v1/projects/{project_id}/runs")).json()
-    assert body["total"] == 3
     assert [r["run_id"] for r in body["items"]] == ids[::-1]  # created_at 倒序
+    assert body["next_cursor"] is None  # 未到 limit,没有下一页
     # 元素结构与单 run 查询一致
     assert set(body["items"][0]) >= {
         "run_id", "project_id", "case_id", "case_version", "environment_id",
@@ -56,19 +64,25 @@ async def test_list_ordered_desc_with_meta(client):
     }
 
 
-async def test_pagination_window(client):
-    project_id, env_id, case_id = await _setup(client, name="分页项目")
-    ids = [await _trigger(client, project_id, env_id, case_id) for _ in range(3)]
+async def test_cursor_walks_all_without_dup_or_gap(client):
+    project_id, env_id, case_id = await _setup(client, name="翻页项目")
+    ids = [await _trigger(client, project_id, env_id, case_id) for _ in range(5)]
 
-    page1 = (
-        await client.get(f"/api/v1/projects/{project_id}/runs", params={"limit": 2, "offset": 0})
-    ).json()
-    page2 = (
-        await client.get(f"/api/v1/projects/{project_id}/runs", params={"limit": 2, "offset": 2})
-    ).json()
-    assert [r["run_id"] for r in page1["items"]] == ids[::-1][:2]
-    assert [r["run_id"] for r in page2["items"]] == ids[::-1][2:]
-    assert (page1["total"], page2["total"]) == (3, 3)
+    # limit=2 翻页链:应恰好走完 5 条,不重不漏
+    seen: list[str] = []
+    cursor: str | None = None
+    for _ in range(10):  # 防死循环上界
+        params = {"limit": 2}
+        if cursor is not None:
+            params["cursor"] = cursor
+        body = (
+            await client.get(f"/api/v1/projects/{project_id}/runs", params=params)
+        ).json()
+        seen.extend(r["run_id"] for r in body["items"])
+        cursor = body["next_cursor"]
+        if cursor is None:
+            break
+    assert seen == ids[::-1]
 
 
 async def test_project_isolation(client):
@@ -78,7 +92,7 @@ async def test_project_isolation(client):
 
     body = (await client.get(f"/api/v1/projects/{other['id']}/runs")).json()
     assert body["items"] == []
-    assert body["total"] == 0
+    assert body["next_cursor"] is None
 
 
 async def test_project_not_found(client):
@@ -87,11 +101,18 @@ async def test_project_not_found(client):
     assert resp.json()["error"]["code"] == "project_not_found"
 
 
-async def test_invalid_pagination_422(client):
-    project_id, _, _ = await _setup(client, name="非法分页项目")
+async def test_invalid_cursor_422(client):
+    project_id, _, _ = await _setup(client, name="非法游标项目")
+    resp = await client.get(
+        f"/api/v1/projects/{project_id}/runs", params={"cursor": "not-a-cursor"}
+    )
+    assert resp.status_code == 422
+    assert resp.json()["error"]["code"] == "invalid_cursor"
+
+
+async def test_invalid_limit_422(client):
+    project_id, _, _ = await _setup(client, name="非法limit项目")
     resp = await client.get(f"/api/v1/projects/{project_id}/runs", params={"limit": 0})
     assert resp.status_code == 422
     resp = await client.get(f"/api/v1/projects/{project_id}/runs", params={"limit": 101})
-    assert resp.status_code == 422
-    resp = await client.get(f"/api/v1/projects/{project_id}/runs", params={"offset": -1})
     assert resp.status_code == 422

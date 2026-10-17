@@ -27,6 +27,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
+    // 每个用例自动清空 vi.fn 的调用记录:跨用例累积会让"只断言出现过"的检查失真
+    clearMocks: true,
     setupFiles: ['./src/test/setup.ts'],
   },
 })

@@ -5,6 +5,8 @@ import { reactive, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRouter } from 'vue-router'
 
+import '@/assets/list-page.css'
+
 import { api } from '@/api/client'
 import { useCaseStore } from '@/stores/case'
 import { useProjectStore } from '@/stores/project'
@@ -96,12 +98,7 @@ async function turnPage(delta: number) {
     </div>
 
     <div class="pager">
-      <el-button
-        class="prev"
-        size="small"
-        :disabled="page <= 1"
-        @click="turnPage(-1)"
-      >
+      <el-button class="prev" size="small" :disabled="page <= 1" @click="turnPage(-1)">
         上一页
       </el-button>
       <span>第 {{ page }} 页 / 共 {{ total }} 条</span>
@@ -143,42 +140,6 @@ async function turnPage(delta: number) {
 
 .head,
 .row {
-  display: grid;
   grid-template-columns: 1fr 80px 80px 220px;
-  gap: 8px;
-  padding: 8px 12px;
-  align-items: center;
-}
-
-.head {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-
-.row {
-  border-bottom: 1px solid var(--el-border-color-lighter);
-  cursor: pointer;
-}
-
-.row:hover {
-  background: var(--el-fill-color-light);
-}
-
-.none {
-  color: var(--el-text-color-secondary);
-  padding: 16px 12px;
-}
-
-.pager {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-}
-
-.empty {
-  padding-top: 80px;
 }
 </style>

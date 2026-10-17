@@ -77,10 +77,8 @@ class StepList(BaseModel):
     truncated: bool
 
 
-class RunList(BaseModel):
-    """执行列表(报告列表页):offset 分页,created_at 倒序。"""
+class RunPage(BaseModel):
+    """执行列表(报告列表页):游标分页,created_at 倒序,只支持下一页(API设计 §分页)。"""
 
     items: list[RunOut]
-    total: int
-    limit: int
-    offset: int
+    next_cursor: str | None = None

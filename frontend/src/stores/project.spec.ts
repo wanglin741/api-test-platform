@@ -6,7 +6,9 @@ import type { ApiClient } from '@/api/client'
 import { useProjectStore } from './project'
 
 /** store 缝的 mock client:只实现 store 实际调用的方法(前端设计 §7 缝 1)。 */
-function mockClient(handlers: { GET?: (...args: unknown[]) => unknown; POST?: (...args: unknown[]) => unknown } = {}): ApiClient {
+function mockClient(
+  handlers: { GET?: (...args: unknown[]) => unknown; POST?: (...args: unknown[]) => unknown } = {},
+): ApiClient {
   return {
     GET: handlers.GET ?? vi.fn(),
     POST: handlers.POST ?? vi.fn(),
@@ -54,7 +56,12 @@ describe('projectStore', () => {
     setActivePinia(createPinia())
     localStorage.clear()
     const client = mockClient({
-      GET: vi.fn(async () => okResponse([{ id: 1, name: 'A' }, { id: 2, name: 'B' }])),
+      GET: vi.fn(async () =>
+        okResponse([
+          { id: 1, name: 'A' },
+          { id: 2, name: 'B' },
+        ]),
+      ),
     })
     const store = useProjectStore()
     await store.load(client)

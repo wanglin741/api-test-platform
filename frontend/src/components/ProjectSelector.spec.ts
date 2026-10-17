@@ -17,7 +17,12 @@ describe('ProjectSelector', () => {
     localStorage.clear()
     setActivePinia(createPinia())
     const client = {
-      GET: vi.fn(async () => okResponse([{ id: 1, name: 'Alpha' }, { id: 2, name: 'Beta' }])),
+      GET: vi.fn(async () =>
+        okResponse([
+          { id: 1, name: 'Alpha' },
+          { id: 2, name: 'Beta' },
+        ]),
+      ),
     } as unknown as ApiClient
     const store = useProjectStore()
     await store.load(client)

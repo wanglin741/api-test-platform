@@ -14,14 +14,30 @@ function okResponse(body: unknown) {
 }
 
 const ENV_A = {
-  id: 1, project_id: 1, name: 'dev', description: null, base_url: 'http://dev',
-  default_headers: {}, auth: null, is_default: false, sort_order: 0,
-  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  id: 1,
+  project_id: 1,
+  name: 'dev',
+  description: null,
+  base_url: 'http://dev',
+  default_headers: {},
+  auth: null,
+  is_default: false,
+  sort_order: 0,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
 }
 const ENV_B = {
-  id: 2, project_id: 1, name: 'staging', description: null, base_url: 'http://staging',
-  default_headers: {}, auth: null, is_default: true, sort_order: 1,
-  created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  id: 2,
+  project_id: 1,
+  name: 'staging',
+  description: null,
+  base_url: 'http://staging',
+  default_headers: {},
+  auth: null,
+  is_default: true,
+  sort_order: 1,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-01T00:00:00Z',
 }
 
 describe('environmentStore', () => {

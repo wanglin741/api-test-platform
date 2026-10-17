@@ -26,8 +26,16 @@ function okResponse(body: unknown) {
 }
 
 const CASE_A = {
-  id: 1, project_id: 1, name: '登录链路', description: null, priority: 'P0', tags: [],
-  current_version: 2, created_by: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+  id: 1,
+  project_id: 1,
+  name: '登录链路',
+  description: null,
+  priority: 'P0',
+  tags: [],
+  current_version: 2,
+  created_by: 1,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-02T00:00:00Z',
 }
 
 async function mountView() {
@@ -76,10 +84,7 @@ describe('CasesView', () => {
     await next.trigger('click')
     await flushPromises()
 
-    const [, opts] = get.mock.calls.at(-1) as [
-      string,
-      { params: { query: { page: number } } },
-    ]
+    const [, opts] = get.mock.calls.at(-1) as [string, { params: { query: { page: number } } }]
     expect(opts.params.query.page).toBe(2)
   })
 })

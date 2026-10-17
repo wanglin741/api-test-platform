@@ -30,9 +30,17 @@ function okResponse(body: unknown) {
 }
 
 const DETAIL = {
-  id: 7, project_id: 1, name: '登录链路', description: null, priority: 'P0', tags: [],
-  current_version: 2, dsl: { dsl_version: 1, steps: [{ name: 'step1' }] },
-  created_by: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+  id: 7,
+  project_id: 1,
+  name: '登录链路',
+  description: null,
+  priority: 'P0',
+  tags: [],
+  current_version: 2,
+  dsl: { dsl_version: 1, steps: [{ name: 'step1' }] },
+  created_by: 1,
+  created_at: '2026-01-01T00:00:00Z',
+  updated_at: '2026-01-02T00:00:00Z',
 }
 
 async function mountView() {
@@ -51,7 +59,7 @@ describe('CaseDetailView', () => {
     expect(wrapper.find('.dsl-editor .cm-content').element.textContent).toContain('"steps"')
   })
 
-  it('保存:PATCH 提交解析后的 dsl,版本号随之更新', async () => {
+  it('保存:PATCH 提交名称 + 解析后的 dsl,版本号随之更新', async () => {
     get.mockResolvedValue(okResponse(DETAIL))
     const saved = { ...DETAIL, current_version: 3 }
     patch.mockResolvedValue(okResponse(saved))
@@ -62,10 +70,25 @@ describe('CaseDetailView', () => {
     await wrapper.find('.save-btn').trigger('click')
     await flushPromises()
 
-    const [path, opts] = patch.mock.calls[0] as [string, { body: { dsl: unknown } }]
+    const [path, opts] = patch.mock.calls[0] as [string, { body: { name: string; dsl: unknown } }]
     expect(path).toBe('/api/v1/cases/{case_id}')
+    expect(opts.body.name).toBe('登录链路')
     expect(opts.body.dsl).toEqual({ dsl_version: 1, steps: [] })
     expect(wrapper.find('.version').text()).toBe('v3')
+  })
+
+  it('改名后保存:新名称随 PATCH 提交', async () => {
+    get.mockResolvedValue(okResponse(DETAIL))
+    patch.mockResolvedValue(okResponse({ ...DETAIL, name: '下单主链路', current_version: 3 }))
+    const wrapper = await mountView()
+
+    await wrapper.find('.header input').setValue('下单主链路')
+    await wrapper.find('.save-btn').trigger('click')
+    await flushPromises()
+
+    const [, opts] = patch.mock.calls[0] as [string, { body: { name: string } }]
+    expect(opts.body.name).toBe('下单主链路')
+    expect((wrapper.find('.header input').element as HTMLInputElement).value).toBe('下单主链路')
   })
 
   it('保存返回 dsl_invalid:回显每条校验错误,不弹全局错误也能看到明细', async () => {

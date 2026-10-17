@@ -13,7 +13,12 @@ type VariableIn = components['schemas']['VariableIn']
 type VariableOut = components['schemas']['VariableOut']
 
 function toEditable(rows: VariableOut[]): VariableIn[] {
-  return rows.map(({ name, value, is_secret, description }) => ({ name, value, is_secret, description }))
+  return rows.map(({ name, value, is_secret, description }) => ({
+    name,
+    value,
+    is_secret,
+    description,
+  }))
 }
 
 export const useVariableStore = defineStore('variables', () => {
@@ -59,5 +64,13 @@ export const useVariableStore = defineStore('variables', () => {
     })
   }
 
-  return { projectVars, envVars, loading, loadProjectVars, loadEnvVars, saveProjectVars, saveEnvVars }
+  return {
+    projectVars,
+    envVars,
+    loading,
+    loadProjectVars,
+    loadEnvVars,
+    saveProjectVars,
+    saveEnvVars,
+  }
 })

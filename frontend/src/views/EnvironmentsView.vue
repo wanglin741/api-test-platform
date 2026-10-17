@@ -22,8 +22,8 @@ const environmentStore = useEnvironmentStore()
 const { items: environments, selectedId } = storeToRefs(environmentStore)
 const variableStore = useVariableStore()
 
-const selectedEnv = computed(() =>
-  environments.value.find((e) => e.id === selectedId.value) ?? null,
+const selectedEnv = computed(
+  () => environments.value.find((e) => e.id === selectedId.value) ?? null,
 )
 
 watch(
@@ -134,12 +134,7 @@ async function saveProjectVars(items: VariableIn[]) {
   <div v-else class="page">
     <div class="env-bar">
       <el-select v-model="selectedId" class="env-select" placeholder="选择环境">
-        <el-option
-          v-for="env in environments"
-          :key="env.id"
-          :label="env.name"
-          :value="env.id"
-        />
+        <el-option v-for="env in environments" :key="env.id" :label="env.name" :value="env.id" />
       </el-select>
       <el-button :icon="Plus" @click="openCreate">新建环境</el-button>
       <el-button :disabled="!selectedEnv" @click="openEdit">编辑</el-button>
@@ -148,10 +143,7 @@ async function saveProjectVars(items: VariableIn[]) {
 
     <el-tabs v-model="activeTab">
       <el-tab-pane label="环境变量" name="env">
-        <VariableTable
-          v-if="selectedEnv"
-          v-model="variableStore.envVars"
-        >
+        <VariableTable v-if="selectedEnv" v-model="variableStore.envVars">
           <template #actions>
             <el-button type="primary" @click="saveEnvVars(variableStore.envVars)">保存</el-button>
           </template>
