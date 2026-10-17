@@ -1,0 +1,22 @@
+# import-linter contract: engine/ must not depend on frameworks
+# (docs/design/执行引擎.md §1). Run: cd backend && uv run lint-imports
+# NOTE: keep this file ASCII-only -- import-linter decodes it with the
+# locale encoding on Windows (gbk), non-ASCII comments crash it.
+[importlinter]
+root_package = app
+include_external_packages = True
+
+[importlinter:contract:engine-purity]
+name = engine must not import fastapi/celery/sqlalchemy/ORM
+type = forbidden
+source_modules = app.engine
+forbidden_modules =
+    fastapi
+    celery
+    sqlalchemy
+    alembic
+    asyncpg
+    psycopg
+    app.api
+    app.core
+    app.db
