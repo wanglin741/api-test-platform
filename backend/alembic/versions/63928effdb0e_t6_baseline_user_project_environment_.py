@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSONB
 
 
 revision: str = '63928effdb0e'
@@ -37,7 +38,7 @@ def upgrade() -> None:
     sa.Column('name', sa.String(), nullable=False),
     sa.Column('description', sa.Text(), nullable=True),
     sa.Column('owner_id', sa.BigInteger(), nullable=False),
-    sa.Column('settings', sa.JSON(), nullable=False),
+    sa.Column('settings', JSONB(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
@@ -50,8 +51,8 @@ def upgrade() -> None:
     sa.Column('name', sa.String(length=64), nullable=False),
     sa.Column('description', sa.Text(), nullable=True),
     sa.Column('base_url', sa.String(length=512), nullable=True),
-    sa.Column('default_headers', sa.JSON(), nullable=False),
-    sa.Column('auth', sa.JSON(), nullable=True),
+    sa.Column('default_headers', JSONB(), nullable=False),
+    sa.Column('auth', JSONB(), nullable=True),
     sa.Column('is_default', sa.Boolean(), nullable=False),
     sa.Column('sort_order', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),

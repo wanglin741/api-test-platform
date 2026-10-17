@@ -19,7 +19,15 @@ def test_migration_replay(database: None) -> None:
                 "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
             ).fetchall()
         }
-        assert {"user", "project", "environment", "variable", "alembic_version"} <= tables
+        assert {
+            "user",
+            "project",
+            "environment",
+            "variable",
+            "test_case",
+            "test_case_version",
+            "alembic_version",
+        } <= tables
         # 重放后种子用户必须存在(get_current_user 依赖它)
         row = conn.execute(
             "SELECT username, is_superuser FROM \"user\" WHERE username = 'admin'"
