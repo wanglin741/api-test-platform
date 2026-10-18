@@ -13,6 +13,8 @@ class CaseCreate(BaseModel):
     description: str | None = None
     priority: Literal["P0", "P1", "P2", "P3"] | None = None
     tags: list[str] = Field(default_factory=list)
+    # NULL = 未分类(issue #20)
+    folder_id: int | None = None
     dsl: dict[str, Any]
     change_note: str | None = Field(default=None, max_length=255)
 
@@ -22,6 +24,8 @@ class CaseUpdate(BaseModel):
     description: str | None = None
     priority: Literal["P0", "P1", "P2", "P3"] | None = None
     tags: list[str] | None = None
+    # 显式传 null 表示移出目录(移回未分类);exclude_unset 区分「没传」与「传了 null」
+    folder_id: int | None = None
     dsl: dict[str, Any] | None = None
     change_note: str | None = Field(default=None, max_length=255)
 
@@ -31,6 +35,7 @@ class CaseOut(BaseModel):
 
     id: int
     project_id: int
+    folder_id: int | None
     name: str
     description: str | None
     priority: str | None

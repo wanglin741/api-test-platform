@@ -20,9 +20,22 @@ export const useCaseStore = defineStore('case', () => {
   const total = ref(0)
   const page = ref(1)
 
-  async function load(projectId: number, client: ApiClient = api, toPage = 1): Promise<void> {
+  async function load(
+    projectId: number,
+    client: ApiClient = api,
+    toPage = 1,
+    // 目录过滤:0 = 未分类,N = 目录及子目录,null = 全部(issue #20)
+    folderId: number | null = null,
+  ): Promise<void> {
     const { data } = await client.GET('/api/v1/projects/{project_id}/cases', {
-      params: { path: { project_id: projectId }, query: { page: toPage, page_size: PAGE_SIZE } },
+      params: {
+        path: { project_id: projectId },
+        query: {
+          page: toPage,
+          page_size: PAGE_SIZE,
+          ...(folderId !== null ? { folder_id: folderId } : {}),
+        },
+      },
     })
     items.value = data?.items ?? []
     total.value = data?.total ?? 0

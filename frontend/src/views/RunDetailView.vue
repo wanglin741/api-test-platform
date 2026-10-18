@@ -97,7 +97,7 @@ function toggleStep(step: StepOut): void {
   <div v-else class="page">
     <div class="header">
       <h2>
-        执行报告 <small>{{ runStore.run.run_id }}</small>
+        测试报告 <small>{{ runStore.run.run_id }}</small>
       </h2>
       <el-tag class="status-tag" :type="statusTag(runStore.run.status)" size="large">
         {{ runStore.run.status }}

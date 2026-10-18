@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import get_settings
 from app.engine.dsl import parse_dsl
-from app.models import Environment, Project, TestCase, TestCaseVersion, User, Variable
+from app.models import Environment, Folder, Project, TestCase, TestCaseVersion, User, Variable
 
 SEED_BASE_URL = os.environ.get("APITEST_SEED_BASE_URL", "http://127.0.0.1:9000")
 SEED_USERNAME = "demo_user"
@@ -87,7 +87,7 @@ def main() -> None:
         # 重置:业务数据全部清空(种子用户保留)
         session.execute(
             text(
-                "TRUNCATE run_step_result, run, test_case_version, test_case, "
+                "TRUNCATE run_step_result, run, test_case_version, test_case, folder, "
                 "variable, environment, project RESTART IDENTITY CASCADE"
             )
         )
@@ -136,8 +136,23 @@ def main() -> None:
             ]
         )
 
+        # 示例目录结构:演示左树右表形态(issue #20);「未分类」= folder_id 为空
+        auth_folder = Folder(project_id=project.id, name="登录链路", sort_order=0)
+        order_folder = Folder(project_id=project.id, name="下单链路", sort_order=1)
+        session.add_all([auth_folder, order_folder])
+        session.flush()
+        session.add(
+            Folder(
+                project_id=project.id,
+                name="验证码",
+                parent_id=auth_folder.id,
+                sort_order=0,
+            )
+        )
+
         case = TestCase(
             project_id=project.id,
+            folder_id=auth_folder.id,
             name="登录后查询",
             description="登录提取 token → 携带 token 查询个人信息",
             priority="P0",

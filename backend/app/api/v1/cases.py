@@ -20,7 +20,7 @@ from app.engine.dsl import parse_dsl
 from app.engine.results import StepResult, response_size
 from app.engine.steps.http import run_http_step
 from app.engine.variables import VariableScope
-from app.models import Environment, Project, TestCase, TestCaseVersion, User, Variable
+from app.models import Environment, Folder, Project, TestCase, TestCaseVersion, User, Variable
 from app.schemas.cases import (
     CaseCreate,
     CaseDetail,
@@ -62,6 +62,43 @@ async def _get_case_or_404(session: AsyncSession, case_id: int) -> TestCase:
     return case
 
 
+UNCATEGORIZED_FOLDER_ID = 0  # 列表过滤的哨兵值:folder_id=0 即「未分类」(folder_id IS NULL)
+
+
+async def _validate_folder_id(
+    session: AsyncSession, project_id: int, folder_id: int | None
+) -> None:
+    if folder_id is None:
+        return
+    folder = await session.get(Folder, folder_id)
+    if folder is None or folder.deleted_at is not None or folder.project_id != project_id:
+        raise not_found("folder", folder_id)
+
+
+async def _folder_filter_ids(session: AsyncSession, project_id: int, folder_id: int) -> set[int]:
+    """目录过滤的目标集合:该目录 + 其全部后代目录(选中目录即看整棵子树的用例)。
+
+    目录不存在 / 跨项目 / 已删 → 404(调用方据此判 404,这里返回 None)。
+    """
+    folders = (
+        await session.scalars(
+            select(Folder).where(Folder.project_id == project_id, Folder.alive())
+        )
+    ).all()
+    children: dict[int | None, list[int]] = {}
+    for folder in folders:
+        children.setdefault(folder.parent_id, []).append(folder.id)
+    if folder_id not in {f.id for f in folders}:
+        return set()  # 空集合 = 目标目录不在本项目在用目录中,由调用方判 404
+    ids: set[int] = set()
+    stack = [folder_id]
+    while stack:
+        current = stack.pop()
+        ids.add(current)
+        stack.extend(children.get(current, []))
+    return ids
+
+
 async def _get_current_version_row(session: AsyncSession, case: TestCase) -> TestCaseVersion:
     result = await session.execute(
         select(TestCaseVersion).where(
@@ -91,6 +128,7 @@ async def create_case(
     user: User = Depends(get_current_user),
 ) -> CaseDetail:
     await get_project_or_404(session, project_id)
+    await _validate_folder_id(session, project_id, payload.folder_id)
     _validate_dsl(payload.dsl)
     case = TestCase(
         project_id=project_id,
@@ -98,6 +136,7 @@ async def create_case(
         description=payload.description,
         priority=payload.priority,
         tags=payload.tags,
+        folder_id=payload.folder_id,
         current_version=1,
         created_by=user.id,
     )
@@ -122,6 +161,8 @@ async def list_cases(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1),
     keyword: str | None = Query(default=None, max_length=128),
+    # 目录过滤:0 = 未分类(folder_id IS NULL),N = 该目录及其子目录下的用例
+    folder_id: int | None = Query(default=None, ge=0),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> CasePage:
@@ -130,6 +171,13 @@ async def list_cases(
     conditions = [TestCase.project_id == project_id, TestCase.alive()]
     if keyword:
         conditions.append(TestCase.name.ilike(f"%{keyword}%"))
+    if folder_id == UNCATEGORIZED_FOLDER_ID:
+        conditions.append(TestCase.folder_id.is_(None))
+    elif folder_id is not None:
+        ids = await _folder_filter_ids(session, project_id, folder_id)
+        if not ids:  # 目录不存在 / 跨项目 / 已删
+            raise not_found("folder", folder_id)
+        conditions.append(TestCase.folder_id.in_(ids))
     total = await session.scalar(select(func.count()).select_from(TestCase).where(*conditions))
     result = await session.execute(
         select(TestCase)
@@ -169,6 +217,9 @@ async def update_case(
     data = payload.model_dump(exclude_unset=True)
     new_dsl = data.pop("dsl", None)
     change_note = data.pop("change_note", None)
+    if "folder_id" in data:
+        # 显式传 null = 移回未分类,同样要过校验(null 直接放行)
+        await _validate_folder_id(session, case.project_id, data["folder_id"])
     for field, value in data.items():
         setattr(case, field, value)
 

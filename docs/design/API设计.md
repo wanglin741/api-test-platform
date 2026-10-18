@@ -28,6 +28,10 @@ GET /projects/1/cases?page=1&page_size=20&keyword=login&folder_id=3
 → 200 {"items": [...], "total": 128, "page": 1, "page_size": 20}
 ```
 
+```{note}
+`folder_id` 过滤含语义:`folder_id=3` 返回该目录**及其子目录**下的用例(选中目录即看整棵子树);`folder_id=0` 是「未分类」哨兵(按 `folder_id IS NULL` 查);不传则不过滤。目录不存在/跨项目 → 404。
+```
+
 `page_size` 上限 **100**,超出则钳制到 100 而非报错(报错会让客户端的「一页拉全部」写法直接失败)。
 
 **`run` 列表用游标分页**:
@@ -135,8 +139,9 @@ projects
 folders
   GET    /projects/{pid}/folders?scope=case
   POST   /projects/{pid}/folders
-  PATCH  /folders/{fid}                    改名 / 移动 / 排序
-  DELETE /folders/{fid}
+  PATCH  /folders/{fid}                    改名
+  POST   /folders/{fid}/move               移动(目标父节点 + 同级排序;环检测/深度限 3/跨项目拒绝)
+  DELETE /folders/{fid}                    非空(有子目录或有用例)返回 409,不级联
 
 environments
   GET    /projects/{pid}/environments

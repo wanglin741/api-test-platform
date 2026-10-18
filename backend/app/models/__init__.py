@@ -2,6 +2,7 @@
 
 from app.models.base import Base
 from app.models.environment import Environment
+from app.models.folder import Folder
 from app.models.project import Project
 from app.models.run import RUN_TERMINAL_STATUSES, Run, RunStepResult
 from app.models.test_case import TestCase, TestCaseVersion
@@ -11,6 +12,7 @@ from app.models.variable import Variable
 __all__ = [
     "Base",
     "Environment",
+    "Folder",
     "Project",
     "RUN_TERMINAL_STATUSES",
     "Run",

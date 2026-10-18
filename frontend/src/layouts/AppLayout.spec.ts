@@ -25,6 +25,7 @@ describe('AppLayout', () => {
     })
 
     const items = wrapper.findAll('.el-menu-item')
-    expect(items.map((i) => i.text())).toEqual(['用例管理', '环境与变量', '执行报告'])
+    // issue #20:导航措辞对齐平台惯例,路由路径不变
+    expect(items.map((i) => i.text())).toEqual(['接口用例', '环境与变量', '测试报告'])
   })
 })

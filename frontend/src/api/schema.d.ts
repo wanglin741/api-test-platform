@@ -41,6 +41,59 @@ export interface paths {
     patch: operations['update_project_api_v1_projects__project_id__patch']
     trace?: never
   }
+  '/api/v1/projects/{project_id}/folders': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List Folders */
+    get: operations['list_folders_api_v1_projects__project_id__folders_get']
+    put?: never
+    /** Create Folder */
+    post: operations['create_folder_api_v1_projects__project_id__folders_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/folders/{folder_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /** Delete Folder */
+    delete: operations['delete_folder_api_v1_folders__folder_id__delete']
+    options?: never
+    head?: never
+    /** Rename Folder */
+    patch: operations['rename_folder_api_v1_folders__folder_id__patch']
+    trace?: never
+  }
+  '/api/v1/folders/{folder_id}/move': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Move Folder */
+    post: operations['move_folder_api_v1_folders__folder_id__move_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/projects/{project_id}/cases': {
     parameters: {
       query?: never
@@ -283,6 +336,8 @@ export interface components {
       priority?: ('P0' | 'P1' | 'P2' | 'P3') | null
       /** Tags */
       tags?: string[]
+      /** Folder Id */
+      folder_id?: number | null
       /** Dsl */
       dsl: {
         [key: string]: unknown
@@ -296,6 +351,8 @@ export interface components {
       id: number
       /** Project Id */
       project_id: number
+      /** Folder Id */
+      folder_id: number | null
       /** Name */
       name: string
       /** Description */
@@ -331,6 +388,8 @@ export interface components {
       id: number
       /** Project Id */
       project_id: number
+      /** Folder Id */
+      folder_id: number | null
       /** Name */
       name: string
       /** Description */
@@ -375,6 +434,8 @@ export interface components {
       priority?: ('P0' | 'P1' | 'P2' | 'P3') | null
       /** Tags */
       tags?: string[] | null
+      /** Folder Id */
+      folder_id?: number | null
       /** Dsl */
       dsl?: {
         [key: string]: unknown
@@ -482,6 +543,66 @@ export interface components {
       is_default?: boolean | null
       /** Sort Order */
       sort_order?: number | null
+    }
+    /** FolderCreate */
+    FolderCreate: {
+      /** Name */
+      name: string
+      /** Parent Id */
+      parent_id?: number | null
+      /**
+       * Scope
+       * @default case
+       */
+      scope: string
+      /**
+       * Sort Order
+       * @default 0
+       */
+      sort_order: number
+    }
+    /**
+     * FolderMove
+     * @description 移动:目标父节点(NULL = 顶层)+ 同级排序。环/深度/跨项目由端点校验。
+     */
+    FolderMove: {
+      /** Parent Id */
+      parent_id?: number | null
+      /**
+       * Sort Order
+       * @default 0
+       */
+      sort_order: number
+    }
+    /** FolderOut */
+    FolderOut: {
+      /** Id */
+      id: number
+      /** Project Id */
+      project_id: number
+      /** Scope */
+      scope: string
+      /** Parent Id */
+      parent_id: number | null
+      /** Name */
+      name: string
+      /** Sort Order */
+      sort_order: number
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /** FolderUpdate */
+    FolderUpdate: {
+      /** Name */
+      name?: string | null
     }
     /** HTTPValidationError */
     HTTPValidationError: {
@@ -911,12 +1032,180 @@ export interface operations {
       }
     }
   }
+  list_folders_api_v1_projects__project_id__folders_get: {
+    parameters: {
+      query?: {
+        scope?: string
+      }
+      header?: never
+      path: {
+        project_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FolderOut'][]
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_folder_api_v1_projects__project_id__folders_post: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        project_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['FolderCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FolderOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  delete_folder_api_v1_folders__folder_id__delete: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        folder_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  rename_folder_api_v1_folders__folder_id__patch: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        folder_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['FolderUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FolderOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  move_folder_api_v1_folders__folder_id__move_post: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        folder_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['FolderMove']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['FolderOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
   list_cases_api_v1_projects__project_id__cases_get: {
     parameters: {
       query?: {
         page?: number
         page_size?: number
         keyword?: string | null
+        folder_id?: number | null
       }
       header?: never
       path: {

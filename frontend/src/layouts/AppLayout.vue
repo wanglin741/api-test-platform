@@ -11,9 +11,10 @@ const route = useRoute()
     <el-aside width="200px" class="aside">
       <div class="brand">接口自动化测试平台</div>
       <el-menu :default-active="route.path" router>
-        <el-menu-item index="/cases">用例管理</el-menu-item>
+        <!-- 导航措辞对齐平台惯例(issue #20);路由路径不变,避免书签失效 -->
+        <el-menu-item index="/cases">接口用例</el-menu-item>
         <el-menu-item index="/environments">环境与变量</el-menu-item>
-        <el-menu-item index="/runs">执行报告</el-menu-item>
+        <el-menu-item index="/runs">测试报告</el-menu-item>
       </el-menu>
     </el-aside>
     <el-container>

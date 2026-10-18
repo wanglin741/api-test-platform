@@ -20,6 +20,10 @@ class TestCase(Base, TimestampMixin, SoftDeleteMixin):
 
     id: Mapped[int] = pk()
     project_id: Mapped[int] = fk_column("project")
+    # 可空:NULL 即「未分类」(issue #20);目录删除拒绝非空,不会留下悬挂引用
+    folder_id: Mapped[int | None] = mapped_column(
+        ForeignKey("folder.id", name="fk_test_case_folder_id_folder"), nullable=True
+    )
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     priority: Mapped[str | None] = mapped_column(String(8), nullable=True)

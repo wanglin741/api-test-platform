@@ -24,6 +24,7 @@ def test_migration_replay(database: None) -> None:
             "project",
             "environment",
             "variable",
+            "folder",
             "test_case",
             "test_case_version",
             "run",
