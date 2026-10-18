@@ -1,7 +1,12 @@
 """执行进度事件名与过滤白名单(架构设计 §6 / API设计 §5)。
 
 纯常量模块,无任何依赖:引擎(不 import 框架/Redis)、任务层与 API 层
-三方共用同一套名字,不出现拼写漂移。
+三方共用同一套名字,不出现拼写漂移 —— 发事件的一方必须 import 这里的
+常量,不许写字面量。
+
+当前已上线:RUN_STARTED / RUN_FINISHED(任务层)、STEP_FINISHED(引擎)、
+TERMINAL_EVENT(SSE 端点收尾)。其余为已定契约、随后续变更启用,
+载荷形状以设计文档为准。
 """
 
 RUN_STARTED = "run.started"

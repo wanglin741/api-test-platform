@@ -21,7 +21,7 @@ import redis as redis_py
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.db.session import make_sync_engine, make_sync_session_factory
 from app.engine import EngineContext, execute as engine_execute
 from app.engine.dsl import parse_dsl
@@ -120,6 +120,23 @@ def _load_variables(session: Session, run: Run) -> tuple[dict, dict]:
     )
 
 
+def _publish_run_finished(
+    run_id: str, status: str, summary: dict | None, settings: Settings
+) -> None:
+    """终态事件兜底:无常驻 publisher 的退出路径也补发一条,订阅端才知道收尾。
+
+    覆盖两类窗口 —— 任务重投时执行已终态(如 pending 期被取消)、崩溃发生
+    在 publisher 构造之前(DB 错误、版本缺失、DSL 解析失败)。重复终态
+    事件对客户端幂等无害。发布失败由 StreamPublisher 吞掉,不影响执行。
+    """
+    StreamPublisher(
+        redis_py.Redis.from_url(settings.redis_url),
+        run_id,
+        max_len=settings.run_stream_max_len,
+        ttl_seconds=settings.run_stream_ttl_seconds,
+    ).publish(RUN_FINISHED, {"status": status, "summary": summary})
+
+
 @celery_app.task(name="engine.execute_run", bind=True)
 def execute_run(self, run_id: str) -> None:
     settings = get_settings()
@@ -132,6 +149,10 @@ def execute_run(self, run_id: str) -> None:
             run = session.get(Run, uuid.UUID(run_id))
             # 幂等检查:acks_late + reject_on_worker_lost 下任务会被重投
             if run is None or run.status in RUN_TERMINAL_STATUSES:
+                if run is not None:
+                    # 终态可能来自 pending 期取消(无 publisher 发过事件):
+                    # 补一条终态,订阅端才不会对着一个已结束的执行干等
+                    _publish_run_finished(run_id, run.status, run.summary, settings)
                 return
 
             run.status = "running"
@@ -230,8 +251,11 @@ def execute_run(self, run_id: str) -> None:
             "assertion_total": 0, "assertion_passed": 0,
         }
         session.commit()
-        # 崩溃兜底路径同样要发终态事件:订阅端才知道该收尾了
-        if publisher is not None:
+        # 崩溃兜底路径同样要发终态事件:订阅端才知道该收尾了。
+        # publisher 尚未构造的窗口(DB 错误 / 版本缺失 / DSL 解析失败)走兜底发布
+        if publisher is None:
+            _publish_run_finished(run_id, run.status, run.summary, settings)
+        else:
             publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
     finally:
         sync_engine.dispose()

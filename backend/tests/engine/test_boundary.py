@@ -24,6 +24,9 @@ ALLOWED_THIRD_PARTY = {
     "annotated_types",
 }
 
+# 引擎唯一放行的应用层模块:事件名常量(纯常量、零依赖,spec 定为三方共用)
+ALLOWED_APP_MODULES = {"app.event_names"}
+
 
 @pytest.fixture(scope="module")
 def graph() -> Iterator[grimp.ImportGraph]:
@@ -51,7 +54,8 @@ def test_engine_import_boundary(graph: grimp.ImportGraph) -> None:
                 continue
             # 引擎不得 import 应用的其他层(config 也经 context 注入)
             if imported.startswith("app."):
-                violations.append(f"{module} -> {imported}(应用层耦合)")
+                if imported not in ALLOWED_APP_MODULES:
+                    violations.append(f"{module} -> {imported}(应用层耦合)")
                 continue
             if root in ALLOWED_THIRD_PARTY:
                 continue

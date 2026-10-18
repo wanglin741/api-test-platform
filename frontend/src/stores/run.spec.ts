@@ -416,4 +416,39 @@ describe('runStore.startStream', () => {
     source.emit('run.finished', { status: 'success', summary: { total: 1 } })
     expect(store.run?.status).toBe('running') // 迟到事件被忽略
   })
+
+  it('首刷 GET 失败:降级轮询自愈,不搁浅在空页', async () => {
+    setActivePinia(createPinia())
+    const client = mockClient({
+      GET: vi.fn(async () => {
+        throw new Error('boom')
+      }),
+    })
+    const store = useRunStore()
+
+    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
+
+    expect(store.polling).toBe(true)
+    expect(store.streaming).toBe(false)
+  })
+
+  it('await 打底期间订阅被替换(切换报告):旧订阅不开流、不写状态', async () => {
+    setActivePinia(createPinia())
+    let resolveA!: (value: unknown) => void
+    const pending = new Promise((resolve) => {
+      resolveA = resolve
+    })
+    // 两个并发 GET 共享同一个挂起 promise:模拟打底尚未返回
+    const client = mockClient({ GET: vi.fn(() => pending) })
+    const store = useRunStore()
+
+    const pendingA = store.startStream('r-a', client, (url) => new FakeEventSource(url))
+    store.stopStream() // 视图卸载/切换,B 的 startStream 也会先 stop
+    resolveA(okResponse(RUN_RUNNING))
+    await pendingA
+
+    expect(FakeEventSource.instances).toHaveLength(0)
+    expect(store.streaming).toBe(false)
+    expect(store.run).toBeNull() // 旧 run 的数据不落地
+  })
 })

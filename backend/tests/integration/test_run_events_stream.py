@@ -123,3 +123,45 @@ async def test_crash_fallback_still_publishes_run_finished(
     assert names[0] == "run.started"  # 崩溃前已发布
     assert names[-1] == "run.finished"
     assert json.loads(events[-1]["data"])["status"] == "error"
+
+
+async def test_crash_before_publisher_still_publishes_run_finished(
+    client, local_server, monkeypatch
+):
+    """publisher 构造之前的崩溃(DB 错误 / 版本缺失 / DSL 解析失败)也补发终态。"""
+    from app.tasks import engine_tasks
+
+    def boom(dsl):
+        raise RuntimeError("DSL 炸了")
+
+    monkeypatch.setattr(engine_tasks, "parse_dsl", boom)
+    run_id = await _setup_and_run(client, f"{local_server}/json")
+
+    events, _ = await _read_sse(client, run_id)
+
+    names = [e["event"] for e in events]
+    assert names == ["run.finished"]  # 崩溃在 run.started 之前,只有终态
+    assert json.loads(events[-1]["data"])["status"] == "error"
+
+
+async def test_redelivery_of_terminal_run_publishes_run_finished(client, local_server):
+    """任务重投时执行已终态(如 pending 期被取消):早退前补发终态事件。
+
+    直接查流而非重连 SSE:端点见到首条终态即关闭,第二条终态只在流里。
+    """
+    import redis as redis_py
+
+    from app.core.config import get_settings
+    from app.tasks.engine_tasks import execute_run
+
+    run_id = await _setup_and_run(client, f"{local_server}/json")
+    events_before, _ = await _read_sse(client, run_id)
+    assert sum(1 for e in events_before if e["event"] == "run.finished") == 1
+
+    execute_run.run(run_id)  # 重投:命中幂等早退,但补发一条终态
+
+    client_py = redis_py.Redis.from_url(get_settings().redis_url)
+    stream = client_py.xrange(f"run:events:{run_id}")
+    finished = [fields for _, fields in stream if fields[b"event"] == b"run.finished"]
+    assert len(finished) == 2  # 原始 + 重投补发(重复终态对客户端幂等无害)
+    assert json.loads(finished[-1][b"data"])["status"] == "success"

@@ -47,7 +47,7 @@ const runId = routeParamsId(route.params.id)
 
 onMounted(() => {
   // 报告详情是单例:先清掉上一条 run 的残留,再开始拉新报告。
-  // 事件流为主(SSE),不可用时 store 内部自动降级为轮询
+  // 事件流为主(SSE);无 EventSource 的环境由 store 内部降级为轮询
   runStore.reset()
   void runStore.startStream(runId, api)
 })

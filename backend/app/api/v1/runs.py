@@ -12,10 +12,10 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import SEED_USERNAME, get_current_user, get_db
 from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
-from app.core.errors import ConflictError, ValidationFailedError, not_found
+from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
 from app.event_names import TERMINAL_EVENT
 from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
 from app.run_events import stream_key
@@ -268,23 +268,30 @@ async def cancel_run(
     return CancelAck(run_id=run.id, status=run.status)
 
 
-async def _ensure_run_exists(run_id: uuid.UUID, request: Request) -> None:
-    """流开始前的 404 判定,用短会话即用即释。
+async def _ensure_run_stream_access(run_id: uuid.UUID, request: Request) -> None:
+    """流开始前的认证 + 404 判定,短会话即用即释。
 
-    SSE 端点不能用 yield 依赖的请求级会话:其清理在流结束后才跑,
-    会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在响应开始前
-    运行,404 在流开始前返回。
+    SSE 端点不能用 yield 依赖(get_db / get_current_user):其清理在流
+    结束后才跑,会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在
+    响应开始前运行,认证失败 / 404 都在流开始前返回。认证查询与
+    get_current_user 保持同一缝(SEED_USERNAME),真实认证落地时同步换。
     """
     factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
     async with factory() as session:
+        result = await session.execute(select(User).where(User.username == SEED_USERNAME))
+        if result.scalar_one_or_none() is None:
+            raise AppError(
+                status_code=500,
+                code="seed_user_missing",
+                message="种子用户不存在,请确认迁移已执行",
+            )
         await _get_run_or_404(session, run_id)
 
 
 @router.get("/{run_id}/events", response_class=EventSourceResponse)
 async def stream_run_events(
     run_id: uuid.UUID,
-    response: Response,
-    _run: None = Depends(_ensure_run_exists),
+    _access: None = Depends(_ensure_run_stream_access),
 ) -> AsyncIterator[ServerSentEvent]:
     """SSE 实时进度事件流(架构设计 §6 / API设计 §5)。
 
@@ -292,16 +299,12 @@ async def stream_run_events(
     完全部事件后自然收尾,运行中的执行推到终态为止。快照补偿 /
     Last-Event-ID 续传 / ?events= 过滤在后续票落地。
 
-    生成器端点由 FastAPI 路由层编码为 SSE 并自带 15 秒保活;每个连接
+    生成器端点由 FastAPI 路由层编码为 SSE、设置 text/event-stream 与
+    Cache-Control / X-Accel-Buffering 两个头、自带 15 秒保活;每个连接
     自建异步 Redis 客户端(绑定当前事件循环,不跨连接复用),断开时
     finally 释放。
     """
-    settings = get_settings()
-    # X-Accel-Buffering: no —— 生产 nginx 不缓冲 SSE;Cache-Control 禁中间层缓存
-    response.headers["Cache-Control"] = "no-cache"
-    response.headers["X-Accel-Buffering"] = "no"
-
-    client = redis_async.Redis.from_url(settings.redis_url)
+    client = redis_async.Redis.from_url(get_settings().redis_url)
     try:
         key = stream_key(run_id)
         last_id = "0"

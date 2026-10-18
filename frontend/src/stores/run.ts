@@ -66,19 +66,28 @@ export const useRunStore = defineStore('run', () => {
     return data?.run_id ?? null
   }
 
-  async function loadRun(runId: string, client: ApiClient = api): Promise<void> {
+  async function fetchRun(runId: string, client: ApiClient = api) {
     const { data } = await client.GET('/api/v1/runs/{run_id}', {
       params: { path: { run_id: runId } },
     })
-    run.value = data ?? null
+    return data ?? null
   }
 
-  async function loadSteps(runId: string, client: ApiClient = api): Promise<void> {
+  async function fetchSteps(runId: string, client: ApiClient = api) {
     const { data } = await client.GET('/api/v1/runs/{run_id}/steps', {
       params: { path: { run_id: runId } },
     })
-    steps.value = data?.items ?? []
-    stepsTruncated.value = data?.truncated ?? false
+    return { items: data?.items ?? [], truncated: data?.truncated ?? false }
+  }
+
+  async function loadRun(runId: string, client: ApiClient = api): Promise<void> {
+    run.value = await fetchRun(runId, client)
+  }
+
+  async function loadSteps(runId: string, client: ApiClient = api): Promise<void> {
+    const result = await fetchSteps(runId, client)
+    steps.value = result.items
+    stepsTruncated.value = result.truncated
   }
 
   async function refresh(runId: string, client: ApiClient = api): Promise<void> {
@@ -96,14 +105,19 @@ export const useRunStore = defineStore('run', () => {
   let lastRunJson: string | null = null
 
   async function pollOnce(runId: string, client: ApiClient): Promise<void> {
-    await loadRun(runId, client)
-    // run 未变化时跳过 steps 重取(前端设计 §5:合并轮询,变更才重取)
-    const current = run.value === null ? null : JSON.stringify(run.value)
-    if (current !== lastRunJson) {
-      lastRunJson = current
-      await loadSteps(runId, client)
+    // 单次轮询失败(网络抖动)不终止轮询:吞掉,下一跳自愈
+    try {
+      await loadRun(runId, client)
+      // run 未变化时跳过 steps 重取(前端设计 §5:合并轮询,变更才重取)
+      const current = run.value === null ? null : JSON.stringify(run.value)
+      if (current !== lastRunJson) {
+        lastRunJson = current
+        await loadSteps(runId, client)
+      }
+      if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) stopPolling()
+    } catch {
+      return
     }
-    if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) stopPolling()
   }
 
   /** 立即刷新一次,非终态则每 intervalMs 再刷;终态自动停。 */
@@ -130,6 +144,9 @@ export const useRunStore = defineStore('run', () => {
   const streaming = ref(false)
   let source: StreamSource | null = null
   let streamHandlers: Array<[string, EventListener]> = []
+  // 当前订阅的 run(null = 无活跃订阅)。await 恢复点与事件回调都校验它:
+  // 切换/关闭报告后,旧的 await 恢复与迟到事件不得写进新报告的状态
+  let streamRunId: string | null = null
 
   /** 事件源只需监听/关闭这一子集:原生 EventSource 天然满足,
    * 测试注入假事件源(完整 EventSource 接口在 jsdom 里没有)。 */
@@ -171,8 +188,25 @@ export const useRunStore = defineStore('run', () => {
   ): Promise<void> {
     stopStream()
     stopPolling()
-    await refresh(runId, client)
+    streamRunId = runId
+    try {
+      // 先取数、守卫后再写:无条件写入会在 await 期间竞态,
+      // 把已切换/卸载的旧 run 数据写进新报告的状态
+      const [runRow, stepRows] = await Promise.all([
+        fetchRun(runId, client),
+        fetchSteps(runId, client),
+      ])
+      if (streamRunId !== runId) return // await 期间订阅已被停止/替换(如切换报告)
+      run.value = runRow
+      steps.value = stepRows.items
+      stepsTruncated.value = stepRows.truncated
+    } catch {
+      // 首刷失败也要留下能自愈的通道:轮询的下一跳会重试,不能搁浅在空页
+      if (streamRunId === runId) startPolling(runId, client)
+      return
+    }
     if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) return
+
     if (eventSourceFactory === defaultEventSourceFactory && typeof EventSource === 'undefined') {
       startPolling(runId, client)
       return
@@ -181,8 +215,12 @@ export const useRunStore = defineStore('run', () => {
     const es = eventSourceFactory(`/api/v1/runs/${runId}/events`)
     source = es
     streaming.value = true
-    const onStarted = (e: MessageEvent) => handleRunStarted(JSON.parse(e.data))
-    const onFinished = (e: MessageEvent) => handleRunFinished(runId, client, JSON.parse(e.data))
+    const onStarted = (e: MessageEvent) => {
+      if (streamRunId === runId) handleRunStarted(JSON.parse(e.data))
+    }
+    const onFinished = (e: MessageEvent) => {
+      if (streamRunId === runId) handleRunFinished(runId, client, JSON.parse(e.data))
+    }
     streamHandlers = [
       ['run.started', onStarted as EventListener],
       ['run.finished', onFinished as EventListener],
@@ -192,6 +230,7 @@ export const useRunStore = defineStore('run', () => {
 
   /** 先摘回调再关闭:关闭后迟到的错误/事件不改变状态。 */
   function stopStream(): void {
+    streamRunId = null
     if (source === null) return
     const es = source
     source = null

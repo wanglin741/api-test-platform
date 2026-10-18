@@ -19,6 +19,7 @@ from app.engine.dsl import CaseDSL
 from app.engine.results import RunStatus, RunSummary, StepResult
 from app.engine.steps.http import run_http_step
 from app.engine.variables import VariableScope
+from app.event_names import STEP_FINISHED
 
 
 async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
@@ -83,7 +84,7 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
             # 每步立即回调,不批量缓冲(§11)—— 长跑期间轮询可见部分结果
             context.sink.on_step_finished(result)
             context.publisher.publish(
-                "step.finished",
+                STEP_FINISHED,
                 {"step_id": step.id, "index": index, "status": result.status},
             )
     finally:
