@@ -279,8 +279,10 @@ class FakeEventSource {
     return [...this.listeners.keys()]
   }
 
-  emit(name: string, data: unknown): void {
-    this.listeners.get(name)?.(new MessageEvent(name, { data: JSON.stringify(data) }))
+  emit(name: string, data?: unknown): void {
+    this.listeners.get(name)?.(
+      new MessageEvent(name, { data: data === undefined ? undefined : JSON.stringify(data) }),
+    )
   }
 }
 
@@ -526,6 +528,54 @@ describe('runStore.startStream', () => {
     expect(store.streaming).toBe(false)
     source.emit('run.finished', { status: 'success', summary: { total: 1 } })
     expect(store.run?.status).toBe('running') // 迟到事件被忽略
+  })
+
+  it('连续 3 次连接失败:停流并降级轮询', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    const source = FakeEventSource.instances[0]!
+
+    source.emit('error')
+    source.emit('error')
+    expect(store.streaming).toBe(true)
+    expect(store.polling).toBe(false)
+
+    source.emit('error')
+
+    expect(source.closed).toBe(true)
+    expect(store.streaming).toBe(false)
+    expect(store.polling).toBe(true) // 降级轮询,页面功能不中断
+  })
+
+  it('open 清零失败计数:两次失败 → 成功 → 两次失败不降级', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    const source = FakeEventSource.instances[0]!
+
+    source.emit('error')
+    source.emit('error')
+    source.emit('open') // 连上:清零
+    source.emit('error')
+    source.emit('error')
+
+    expect(store.streaming).toBe(true)
+    expect(store.polling).toBe(false)
+  })
+
+  it('stopStream 后迟到的 error 不触发降级', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    const source = FakeEventSource.instances[0]!
+
+    store.stopStream()
+    source.emit('error')
+    source.emit('error')
+    source.emit('error')
+
+    expect(store.polling).toBe(false) // 卸载后的迟到错误不触发降级
   })
 
   it('首刷 GET 失败:降级轮询自愈,不搁浅在空页', async () => {

@@ -143,6 +143,8 @@ export const useRunStore = defineStore('run', () => {
   }
 
   // ── SSE 实时进度(架构设计 §6):事件流为主,轮询降级 ────────────────
+  // 连续 3 次连接失败降级轮询;onopen 清零,避免「连上又断」误判累计
+  const MAX_STREAM_FAILURES = 3
   const streaming = ref(false)
   // 运行期状态:进度(已完成/总数)与正在执行的步骤 —— 只由事件驱动,
   // 统计卡仍只由汇总数据驱动(不从步骤事件合成)
@@ -296,6 +298,19 @@ export const useRunStore = defineStore('run', () => {
     const onFinished = (e: MessageEvent) => {
       if (streamRunId === runId) handleRunFinished(runId, client, JSON.parse(e.data))
     }
+    // 连接失败累计:连上(open)即清零,「连上又断」不算连续失败
+    let failures = 0
+    const onOpen = () => {
+      failures = 0
+    }
+    const onError = () => {
+      if (streamRunId !== runId) return
+      failures += 1
+      if (failures < MAX_STREAM_FAILURES) return
+      // 降级:流与轮询互斥,先停流再启轮询,页面功能不中断
+      stopStream()
+      startPolling(runId, client)
+    }
     streamHandlers = [
       [
         'run.snapshot',
@@ -308,6 +323,8 @@ export const useRunStore = defineStore('run', () => {
       ['step.finished', onStepFinished as EventListener],
       ['run.progress', onProgress as EventListener],
       ['run.finished', onFinished as EventListener],
+      ['open', onOpen as EventListener],
+      ['error', onError as EventListener],
     ]
     for (const [name, handler] of streamHandlers) es.addEventListener(name, handler)
   }
