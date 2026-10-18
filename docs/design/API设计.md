@@ -319,23 +319,30 @@ data: {"status": "success", "summary": {...}}
 
 **事件类型**:
 
-| `event` | 触发时机 | 载荷要点 |
+| `event` | 触发时机 | 载荷 |
 |---|---|---|
-| `run.started` | 执行开始 | 步骤总数 |
-| `step.started` | 步骤开始 | 序号、名称、类型 |
-| `step.finished` | 步骤结束 | 状态、耗时、断言统计 |
-| `run.progress` | 进度变化(**限流 1/s**) | 已完成 / 总数 |
-| `run.finished` | 进入终态 | 终态、汇总 |
+| `run.started` | 执行开始(任务层发) | `{total_steps, started_at}` |
+| `step.started` | 步骤构建成功、真正发请求前(引擎发) | `{step_index, step_name, step_type}` |
+| `step.finished` | 步骤结束(引擎发) | `{step_index, step_name, status, duration_ms, assertion_total, assertion_passed}` |
+| `run.progress` | 每步之后(**限流 1/s,限流在发布器**) | `{completed, total}` |
+| `run.finished` | 进入终态(任务层发) | `{status, summary}` |
+| `run.snapshot` | 首连/游标失效时(SSE 端点发) | `{run, steps, steps_truncated}` |
 
-`step.started` 让 UI 能显示「正在执行第 N 步」而不是只在完成后跳数字。代价是事件量翻倍 —— 若成为负担,可通过查询参数 `?events=finished` 只订阅完成事件。
+`step.started` 让 UI 能显示「正在执行第 N 步」而不是只在完成后跳数字。被跳过的步骤只发 `step.finished` 不发 `step.started`(跳过没有「开始」)。
 
-### 断线续传
+### 过滤
+
+可选查询参数 `?events=finished`:白名单只放行 `step.finished` 与 `run.finished`(`run.snapshot` 恒放行 —— 它是重新同步的唯一入口)。**非法取值返回 400**(`code: invalid_events_filter`),不静默忽略。
+
+### 断线续传与快照
 
 SSE 的 `id` 字段是 **Redis Stream 的消息 ID**。浏览器自动重连时会带 `Last-Event-ID` 头,服务端从该 ID 之后继续读,不丢事件。
 
 这是选 Redis Streams 而非 Pub/Sub 的直接原因。Pub/Sub 是至多一次投递,用户刷新页面时正在执行的那次就再也接不上了。
 
-**若 `Last-Event-ID` 早于 Stream 的保留范围**(Stream 用 `MAXLEN ~ 10000` 裁剪),服务端发送一个 `run.snapshot` 事件,携带从 PG 读出的当前完整状态,然后继续推送后续事件。客户端只需要处理这一种「重新同步」情况。
+**起点判定**:无 `Last-Event-ID`(首次连接)、流为空、或游标早于 Stream 保留范围(按「毫秒-序号」**数值**比较,流用 `MAXLEN ~ 10000` 裁剪)⇒ 服务端发送一个 `run.snapshot` 事件,携带从 PG 读出的当前完整状态 `{run, steps, steps_truncated}`(与报告详情接口同一份 schema),然后继续推送后续事件。游标仍有效 ⇒ 从游标之后重放,不发快照。客户端只需要处理这一种「重新同步」情况;快照先取流尾位置再读数据库,快照期间发布的事件不会被漏掉。
+
+**执行已终态的执行**:快照 + `run.finished` 后连接自然关闭,不留下挂起的连接。**连续空读约 60 秒**(worker 被强杀、流里永无终态)时服务端查一次库,已终态则补发 `run.finished` 并关闭。
 
 ### 保活
 
@@ -343,7 +350,7 @@ SSE 的 `id` 字段是 **Redis Stream 的消息 ID**。浏览器自动重连时�
 
 ### 降级
 
-前端在 SSE 连接失败 3 次后,退化为每 2 秒轮询 `GET /runs/{rid}`。该端点本就存在,不需要为降级额外实现任何东西。
+前端在 SSE 连接失败 3 次后(连接成功即清零计数,避免「连上又断」误判),退化为每 2 秒轮询 `GET /runs/{rid}`。该端点本就存在,不需要为降级额外实现任何东西。
 
 ## 6. Mock Server 端点
 
