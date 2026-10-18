@@ -23,6 +23,7 @@ function okResponse(body: unknown) {
   return { data: body, error: undefined, response: new Response() }
 }
 
+// summary 键与后端落库一致(total/error,不是 total_steps/errored —— 引擎落库见 §报告)
 const RUN = {
   run_id: 'r-1',
   project_id: 1,
@@ -33,13 +34,15 @@ const RUN = {
   status: 'success',
   duration_ms: 120,
   summary: {
-    status: 'success',
-    total_steps: 2,
+    total: 2,
     passed: 1,
     failed: 1,
-    errored: 0,
+    error: 0,
     skipped: 0,
-    duration_ms: 120,
+    assertion_total: 2,
+    assertion_passed: 1,
+    request_duration_ms: 118,
+    pass_rate: 0.5,
   },
   created_at: '2026-01-01T00:00:00Z',
   started_at: '2026-01-01T00:00:01Z',
@@ -111,36 +114,84 @@ async function mountView() {
 }
 
 describe('RunDetailView', () => {
-  it('渲染 run 状态、summary 与步骤时间线(含断言明细与通过数)', async () => {
+  it('统计卡:总步骤/通过/失败/出错/跳过/总耗时 + 元信息一行', async () => {
     mockRun(RUN, STEPS)
     const wrapper = await mountView()
 
-    expect(wrapper.find('.status-tag').text()).toBe('success')
-    expect(wrapper.find('.summary .passed').text()).toContain('1')
-    const cards = wrapper.findAll('.step-card')
-    expect(cards).toHaveLength(2)
-    expect(cards[0]?.text()).toContain('登录')
-    expect(cards[0]?.text()).toContain('POST http://dev/login')
-    expect(cards[0]?.text()).toContain('断言 1/1')
-    expect(cards[0]?.text()).toContain('status eq 200')
-    expect(cards[1]?.text()).toContain('断言 0/1')
-    expect(cards[1]?.text()).toContain('响应码不符')
+    const cards = wrapper.findAll('.stat-card')
+    expect(cards).toHaveLength(6)
+    expect(cards[0]?.text()).toBe('2总步骤')
+    expect(cards[1]?.text()).toBe('1通过')
+    expect(cards[2]?.text()).toBe('1失败')
+    expect(cards[3]?.text()).toBe('0出错')
+    expect(cards[4]?.text()).toBe('0跳过')
+    expect(cards[5]?.text()).toBe('120ms总耗时')
+
+    const meta = wrapper.find('.meta-line')
+    expect(meta.text()).toContain('用例 #7')
+    expect(meta.text()).toContain('v2')
+    expect(meta.text()).toContain('环境 #3')
+    expect(meta.text()).toContain('manual')
   })
 
-  it('展开步骤可见请求/响应快照、提取变量;截断有标记', async () => {
+  it('运行中(summary 未落):统计卡显示 — 而不是 0', async () => {
+    mockRun(
+      { ...RUN, status: 'running', summary: null, duration_ms: null },
+      {
+        items: [],
+        count: 0,
+        truncated: false,
+      },
+    )
+    const wrapper = await mountView()
+
+    expect(wrapper.findAll('.stat-card')[0]?.text()).toBe('—总步骤')
+    expect(wrapper.findAll('.stat-card')[1]?.text()).toBe('—通过')
+  })
+
+  it('步骤行:状态/名称/耗时/断言通过数;失败行有醒目标记', async () => {
     mockRun(RUN, STEPS)
     const wrapper = await mountView()
 
-    const first = wrapper.findAll('.step-card')[0]!
-    expect(first.find('.extracted').text()).toContain('token=abc')
+    const rows = wrapper.findAll('.step-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[0]?.text()).toContain('登录')
+    expect(rows[0]?.text()).toContain('断言 1/1')
+    expect(rows[0]?.text()).toContain('30ms')
+    expect(rows[0]?.classes()).not.toContain('is-bad')
 
-    await first.find('.snapshots-toggle').trigger('click')
-    expect(first.find('.snapshots').text()).toContain('{"u":"a"}')
-    expect(first.find('.snapshots').text()).toContain('{"ok":true}')
+    expect(rows[1]?.classes()).toContain('is-bad')
+    expect(rows[1]?.text()).toContain('断言 0/1')
+  })
 
-    const second = wrapper.findAll('.step-card')[1]!
-    await second.find('.snapshots-toggle').trigger('click')
-    expect(second.find('.snapshots').text()).toContain('响应体已截断')
+  it('点行展开明细:请求/响应快照 + 断言逐条 + 提取变量 + 截断标记;再点收起', async () => {
+    mockRun(RUN, STEPS)
+    const wrapper = await mountView()
+
+    const first = wrapper.findAll('.step-row')[0]!
+    expect(first.find('.step-detail').exists()).toBe(false)
+    await first.find('.row-head').trigger('click')
+    expect(first.find('.step-detail').exists()).toBe(true)
+    expect(first.find('.step-detail').text()).toContain('http://dev/login')
+    expect(first.find('.step-detail').text()).toContain('"u"')
+    expect(first.find('.step-detail').text()).toContain('PASS')
+    expect(first.find('.step-detail').text()).toContain('token')
+
+    await first.find('.row-head').trigger('click')
+    expect(first.find('.step-detail').exists()).toBe(false)
+  })
+
+  it('失败步骤展开:断言 FAIL 带期望/实际与 message,响应截断有标记', async () => {
+    mockRun(RUN, STEPS)
+    const wrapper = await mountView()
+
+    const second = wrapper.findAll('.step-row')[1]!
+    await second.find('.row-head').trigger('click')
+    const detail = second.find('.step-detail')
+    expect(detail.text()).toContain('FAIL')
+    expect(detail.text()).toContain('500')
+    expect(detail.text()).toContain('响应码不符')
+    expect(detail.text()).toContain('已截断')
   })
 
   it('非终态:显示取消按钮,点击后 POST cancel', async () => {

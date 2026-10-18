@@ -1,14 +1,17 @@
 <script setup lang="ts">
+import { ArrowRight } from '@element-plus/icons-vue'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { api } from '@/api/client'
+import StepSnapshot from '@/components/StepSnapshot.vue'
 import { TERMINAL_STATUSES, useRunStore } from '@/stores/run'
 
 import type { components } from '@/api/schema'
 
 type StepOut = components['schemas']['StepOut']
 
+/** StepSnapshot 断言行的公共形状(报告侧历史断言为宽松 dict,需收窄) */
 interface AssertionRow {
   type: string
   operator: string
@@ -27,13 +30,6 @@ const STATUS_TAG: Record<string, 'success' | 'danger' | 'warning' | 'info' | 'pr
   stopping: 'warning',
   running: 'primary',
   pending: 'info',
-}
-
-const STEP_DOT: Record<string, string> = {
-  passed: 'dot-passed',
-  failed: 'dot-failed',
-  error: 'dot-error',
-  skipped: 'dot-skipped',
 }
 
 function statusTag(status: string) {
@@ -71,26 +67,28 @@ function assertionRows(step: StepOut): AssertionRow[] {
   return step.assertions as unknown as AssertionRow[]
 }
 
-function assertionText(a: AssertionRow): string {
-  return `${a.type} ${a.operator} ${JSON.stringify(a.expected)} → ${JSON.stringify(a.actual)}`
+// ── 统计卡(前端设计 §6.2):键与后端落库的 run.summary 一致 ──────────
+// 运行中 summary 尚未落库,显示 — 而不是误显 0
+function statValue(key: 'total' | 'passed' | 'failed' | 'error' | 'skipped'): number | '—' {
+  const summary = runStore.run?.summary
+  if (summary === null || summary === undefined) return '—'
+  const value = summary[key]
+  return typeof value === 'number' ? value : 0
 }
 
-function extractedEntries(step: StepOut): [string, unknown][] {
-  return Object.entries(step.extracted_variables ?? {})
+const durationText = () => {
+  const ms = runStore.run?.duration_ms
+  return typeof ms === 'number' ? `${ms}ms` : '—'
 }
 
-// 快照明细按步骤展开/收起(请求头/体 + 响应体可能很长)
+// 快照明细按步骤展开/收起(前端设计 §6.2:先扫统计,再对失败步骤逐个看现场)
 const expanded = ref<Set<number>>(new Set())
 
-function toggleSnapshot(step: StepOut): void {
+function toggleStep(step: StepOut): void {
   const next = new Set(expanded.value)
   if (next.has(step.id)) next.delete(step.id)
   else next.add(step.id)
   expanded.value = next
-}
-
-function hasSnapshot(step: StepOut): boolean {
-  return step.request !== null || step.response !== null
 }
 </script>
 
@@ -115,22 +113,38 @@ function hasSnapshot(step: StepOut): boolean {
       </el-button>
     </div>
 
-    <div class="meta">
+    <div class="stats">
+      <div class="stat-card">
+        <div class="stat-num">{{ statValue('total') }}</div>
+        <div class="stat-label">总步骤</div>
+      </div>
+      <div class="stat-card good">
+        <div class="stat-num">{{ statValue('passed') }}</div>
+        <div class="stat-label">通过</div>
+      </div>
+      <div class="stat-card bad">
+        <div class="stat-num">{{ statValue('failed') }}</div>
+        <div class="stat-label">失败</div>
+      </div>
+      <div class="stat-card bad">
+        <div class="stat-num">{{ statValue('error') }}</div>
+        <div class="stat-label">出错</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">{{ statValue('skipped') }}</div>
+        <div class="stat-label">跳过</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-num">{{ durationText() }}</div>
+        <div class="stat-label">总耗时</div>
+      </div>
+    </div>
+
+    <div class="meta-line">
       用例 #{{ runStore.run.case_id }}(v{{ runStore.run.case_version }})· 环境 #{{
         runStore.run.environment_id
       }}
       · {{ runStore.run.trigger_mode }} · {{ runStore.run.created_at }}
-      <template v-if="runStore.run.duration_ms !== null">
-        · {{ runStore.run.duration_ms }}ms
-      </template>
-    </div>
-
-    <div v-if="runStore.run.summary" class="summary">
-      <span>共 {{ runStore.run.summary.total_steps }} 步</span>
-      <span class="passed">通过 {{ runStore.run.summary.passed }}</span>
-      <span class="failed">失败 {{ runStore.run.summary.failed }}</span>
-      <span class="errored">出错 {{ runStore.run.summary.errored }}</span>
-      <span class="skipped">跳过 {{ runStore.run.summary.skipped }}</span>
     </div>
 
     <el-alert
@@ -141,74 +155,40 @@ function hasSnapshot(step: StepOut): boolean {
       title="步骤明细超出展示上限,仅显示部分"
     />
 
-    <div class="timeline">
-      <div v-for="step in runStore.steps" :key="step.id" class="step-card">
-        <div class="step-head">
-          <span class="dot" :class="STEP_DOT[step.status] ?? 'dot-pending'" />
-          <span class="step-name">{{ step.step_index + 1 }}. {{ step.step_name }}</span>
+    <div class="step-list">
+      <div
+        v-for="step in runStore.steps"
+        :key="step.id"
+        class="step-row"
+        :class="{ 'is-bad': step.status === 'failed' || step.status === 'error' }"
+      >
+        <div class="row-head" @click="toggleStep(step)">
+          <el-icon class="chevron" :class="{ open: expanded.has(step.id) }">
+            <ArrowRight />
+          </el-icon>
           <el-tag :type="statusTag(step.status)" size="small">{{ step.status }}</el-tag>
+          <span class="step-name">{{ step.step_index + 1 }}. {{ step.step_name }}</span>
           <span class="assertion-count"
             >断言 {{ step.assertion_passed }}/{{ step.assertion_total }}</span
           >
           <span class="duration">{{ step.duration_ms }}ms</span>
         </div>
 
-        <div v-if="step.request" class="request">
-          {{ step.request.method }} {{ step.request.url }}
+        <div v-if="expanded.has(step.id)" class="step-detail">
+          <el-alert
+            v-if="step.error_message"
+            class="row-error"
+            type="warning"
+            :closable="false"
+            :title="step.error_message"
+          />
+          <StepSnapshot
+            :request="step.request ?? null"
+            :response="step.response ?? null"
+            :assertions="assertionRows(step)"
+            :extracted="step.extracted_variables"
+          />
         </div>
-        <div v-if="step.error_message" class="error-message">{{ step.error_message }}</div>
-        <div v-if="extractedEntries(step).length" class="extracted">
-          <span v-for="[key, value] in extractedEntries(step)" :key="key" class="extracted-item">
-            {{ key }}={{ String(value) }}
-          </span>
-        </div>
-
-        <ul v-if="step.assertions.length" class="assertions">
-          <li v-for="(a, i) in assertionRows(step)" :key="i" :class="a.passed ? 'ok' : 'bad'">
-            {{ assertionText(a) }}
-            <template v-if="a.message"> — {{ a.message }}</template>
-          </li>
-        </ul>
-
-        <template v-if="hasSnapshot(step)">
-          <el-button class="snapshots-toggle" text size="small" @click="toggleSnapshot(step)">
-            {{ expanded.has(step.id) ? '收起快照' : '请求/响应快照' }}
-          </el-button>
-          <div v-if="expanded.has(step.id)" class="snapshots">
-            <template v-if="step.request">
-              <div class="snap-title">请求</div>
-              <pre class="snap-body"
-                >{{ step.request.method }} {{ step.request.url }}
-{{
-                  Object.entries(step.request.headers ?? {})
-                    .map(([k, v]) => `${k}: ${v}`)
-                    .join('\n')
-                }}
-
-{{ step.request.body ?? '' }}</pre>
-            </template>
-            <template v-if="step.response">
-              <div class="snap-title">
-                响应
-                <el-tag v-if="step.response.truncated" type="warning" size="small">
-                  响应体已截断
-                </el-tag>
-                <span v-if="step.response.size !== null" class="snap-size">
-                  {{ step.response.size }} bytes
-                </span>
-              </div>
-              <pre class="snap-body"
-                >{{ step.response.status_code ?? '-' }}
-{{
-                  Object.entries(step.response.headers ?? {})
-                    .map(([k, v]) => `${k}: ${v}`)
-                    .join('\n')
-                }}
-
-{{ step.response.body ?? '' }}</pre>
-            </template>
-          </div>
-        </template>
       </div>
       <div v-if="!runStore.steps.length" class="none">暂无步骤明细</div>
     </div>
@@ -232,153 +212,129 @@ function hasSnapshot(step: StepOut): boolean {
   font-weight: normal;
 }
 
-.meta,
-.summary {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-  margin-top: 8px;
-}
-
-.summary {
+.stats {
   display: flex;
-  gap: 16px;
+  gap: 12px;
+  margin-top: 12px;
+  flex-wrap: wrap;
 }
 
-.summary .passed {
+.stat-card {
+  min-width: 96px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  padding: 10px 14px;
+  text-align: center;
+}
+
+.stat-num {
+  font-size: 20px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-top: 2px;
+}
+
+.stat-card.good .stat-num {
   color: var(--el-color-success);
 }
 
-.summary .failed,
-.summary .errored {
+.stat-card.bad .stat-num {
   color: var(--el-color-danger);
+}
+
+.meta-line {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
+  margin-top: 10px;
 }
 
 .truncated {
   margin-top: 12px;
 }
 
-.timeline {
+.step-list {
   margin-top: 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.step-card {
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 6px;
-  padding: 10px 14px;
-}
-
-.step-head {
-  display: flex;
-  align-items: center;
   gap: 8px;
 }
 
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
+.step-row {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 6px;
+  overflow: hidden;
 }
 
-.dot-passed {
-  background: var(--el-color-success);
+/* 失败/出错行语义色突出:左侧色条 + 行头底色(调研 §C,MeterSphere 形态) */
+.step-row.is-bad {
+  border-color: var(--el-color-danger-light-5);
 }
 
-.dot-failed,
-.dot-error {
-  background: var(--el-color-danger);
+.step-row.is-bad .row-head {
+  box-shadow: inset 3px 0 0 var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
 }
 
-.dot-skipped {
-  background: var(--el-color-info);
+.row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  background: var(--el-bg-color);
 }
 
-.dot-pending {
-  background: var(--el-border-color);
+.row-head:hover {
+  background: var(--el-fill-color-light);
+}
+
+.step-row.is-bad .row-head:hover {
+  background: var(--el-color-danger-light-8);
+}
+
+.chevron {
+  color: var(--el-text-color-secondary);
+  transition: transform 0.15s;
+}
+
+.chevron.open {
+  transform: rotate(90deg);
+}
+
+.step-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
 }
 
 .assertion-count {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  flex-shrink: 0;
 }
 
 .duration {
-  margin-left: auto;
   color: var(--el-text-color-secondary);
   font-size: 12px;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
 }
 
-.request {
-  font-family: monospace;
-  font-size: 12px;
-  margin-top: 6px;
-  color: var(--el-text-color-regular);
-}
-
-.error-message {
-  margin-top: 6px;
-  color: var(--el-color-danger);
-  font-size: 13px;
-}
-
-.extracted {
-  margin-top: 6px;
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.extracted-item {
-  font-family: monospace;
-  font-size: 12px;
-  background: var(--el-fill-color-light);
-  border-radius: 3px;
-  padding: 1px 6px;
-}
-
-.assertions {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  font-size: 12px;
-}
-
-.assertions .ok {
-  color: var(--el-color-success);
-}
-
-.assertions .bad {
-  color: var(--el-color-danger);
-}
-
-.snapshots {
-  margin-top: 8px;
+.step-detail {
   border-top: 1px dashed var(--el-border-color-lighter);
-  padding-top: 8px;
+  padding: 10px 12px;
 }
 
-.snap-title {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.snap-size {
-  font-family: monospace;
-}
-
-.snap-body {
-  margin: 4px 0 12px;
-  padding: 8px;
-  background: var(--el-fill-color-light);
-  border-radius: 4px;
-  font-size: 12px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
+.row-error {
+  margin-bottom: 8px;
 }
 
 .none {
