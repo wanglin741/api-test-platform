@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     # {{env.XXX}} 允许读取的进程环境变量前缀白名单(执行引擎 §3)
     env_var_whitelist_prefixes: tuple[str, ...] = ("TEST_",)
 
+    # 实时进度事件流(架构设计 §6):流长度上限、运行期 TTL、进度限流间隔
+    run_stream_max_len: int = 10_000
+    run_stream_ttl_seconds: int = 86_400
+    run_progress_interval_ms: int = 1000
+
 
 @lru_cache
 def get_settings() -> Settings:

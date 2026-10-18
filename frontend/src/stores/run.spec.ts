@@ -250,3 +250,170 @@ describe('runStore', () => {
     expect(store.lastEnvId(2)).toBeNull()
   })
 })
+
+/** 可编程的假事件源:记录 URL 与监听器,测试里手动派发事件。 */
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+  readonly url: string
+  closed = false
+  listeners = new Map<string, EventListener>()
+
+  constructor(url: string) {
+    this.url = url
+    FakeEventSource.instances.push(this)
+  }
+
+  addEventListener(name: string, fn: EventListener): void {
+    this.listeners.set(name, fn)
+  }
+
+  removeEventListener(name: string): void {
+    this.listeners.delete(name)
+  }
+
+  close(): void {
+    this.closed = true
+  }
+
+  listenerNames(): string[] {
+    return [...this.listeners.keys()]
+  }
+
+  emit(name: string, data: unknown): void {
+    this.listeners.get(name)?.(new MessageEvent(name, { data: JSON.stringify(data) }))
+  }
+}
+
+describe('runStore.startStream', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    localStorage.clear()
+    FakeEventSource.instances = []
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  function streamClient() {
+    return mockClient({
+      GET: vi.fn(async (path: unknown) =>
+        okResponse(
+          String(path).includes('/steps') ? { items: [], count: 0, truncated: false } : RUN_RUNNING,
+        ),
+      ),
+    })
+  }
+
+  it('startStream:先 refresh 打底再开流,注册 run.started/run.finished 监听', async () => {
+    setActivePinia(createPinia())
+    const client = streamClient()
+    const store = useRunStore()
+
+    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
+
+    expect(store.run?.status).toBe('running')
+    expect(store.streaming).toBe(true)
+    expect(store.polling).toBe(false)
+    const source = FakeEventSource.instances[0]!
+    expect(source.url).toBe('/api/v1/runs/r-1/events')
+    expect([...source.listeners.keys()]).toEqual(
+      expect.arrayContaining(['run.started', 'run.finished']),
+    )
+  })
+
+  it('run.started:补状态与开始时间', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+
+    FakeEventSource.instances[0]!.emit('run.started', {
+      total_steps: 3,
+      started_at: '2026-01-01T00:00:05Z',
+    })
+
+    expect(store.run?.status).toBe('running')
+    expect(store.run?.started_at).toBe('2026-01-01T00:00:05Z')
+  })
+
+  it('run.finished:停流并重拉权威行(数据库行替换事件合成行)', async () => {
+    setActivePinia(createPinia())
+    // 第 1 次 run GET 是打底(running),终态重拉返回数据库权威行
+    const AUTHORITATIVE = {
+      ...RUN_RUNNING,
+      status: 'success',
+      summary: { total: 2, passed: 2 },
+    }
+    let runFetches = 0
+    const client = mockClient({
+      GET: vi.fn(async (path: unknown) =>
+        okResponse(
+          String(path).includes('/steps')
+            ? { items: [], count: 0, truncated: false }
+            : ++runFetches === 1
+              ? RUN_RUNNING
+              : AUTHORITATIVE,
+        ),
+      ),
+    })
+    const store = useRunStore()
+    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
+
+    FakeEventSource.instances[0]!.emit('run.finished', {
+      status: 'success',
+      summary: { total: 2, passed: 2 },
+    })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(store.run?.status).toBe('success')
+    expect(store.run?.summary).toEqual(AUTHORITATIVE.summary)
+    expect(store.streaming).toBe(false)
+    expect(FakeEventSource.instances[0]!.closed).toBe(true)
+    expect(runFetches).toBe(2) // 打底 1 次 + 终态重拉 1 次
+  })
+
+  it('打开已终态的执行:不开流也不轮询', async () => {
+    setActivePinia(createPinia())
+    const client = mockClient({
+      GET: vi.fn(async (path: unknown) =>
+        okResponse(
+          String(path).includes('/steps')
+            ? { items: [], count: 0, truncated: false }
+            : { ...RUN_RUNNING, status: 'success' },
+        ),
+      ),
+    })
+    const store = useRunStore()
+
+    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
+
+    expect(FakeEventSource.instances).toHaveLength(0)
+    expect(store.polling).toBe(false)
+    expect(store.streaming).toBe(false)
+  })
+
+  it('无原生 EventSource(默认工厂在 jsdom):直接降级轮询', async () => {
+    setActivePinia(createPinia())
+    const client = streamClient()
+    const store = useRunStore()
+
+    await store.startStream('r-1', client)
+
+    expect(store.polling).toBe(true)
+    expect(store.streaming).toBe(false)
+    expect(FakeEventSource.instances).toHaveLength(0)
+  })
+
+  it('stopStream:先摘回调再关闭,迟到事件不再改变状态', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    const source = FakeEventSource.instances[0]!
+
+    store.stopStream()
+
+    expect(source.closed).toBe(true)
+    expect(store.streaming).toBe(false)
+    source.emit('run.finished', { status: 'success', summary: { total: 1 } })
+    expect(store.run?.status).toBe('running') // 迟到事件被忽略
+  })
+})

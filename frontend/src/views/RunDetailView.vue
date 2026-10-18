@@ -46,12 +46,14 @@ const runStore = useRunStore()
 const runId = routeParamsId(route.params.id)
 
 onMounted(() => {
-  // 报告详情是单例:先清掉上一条 run 的残留,再开始拉新报告
+  // 报告详情是单例:先清掉上一条 run 的残留,再开始拉新报告。
+  // 事件流为主(SSE),不可用时 store 内部自动降级为轮询
   runStore.reset()
-  runStore.startPolling(runId, api)
+  void runStore.startStream(runId, api)
 })
 
 onBeforeUnmount(() => {
+  runStore.stopStream()
   runStore.stopPolling()
 })
 

@@ -14,6 +14,8 @@ os.environ.setdefault(
     "APITEST_DATABASE_URL_SYNC",
     f"postgresql+psycopg://apitest:apitest@localhost:5432/{_TEST_DB}",
 )
+# 事件流测试用独立 db index,与开发库(db 0)隔离;每个用例前 flushdb
+os.environ.setdefault("APITEST_REDIS_URL", "redis://localhost:6379/15")
 
 from pathlib import Path
 
@@ -63,6 +65,10 @@ def clean_tables(database: None) -> None:
             "TRUNCATE run_step_result, run, test_case_version, test_case, folder, "
             "variable, environment, project RESTART IDENTITY CASCADE"
         )
+    # 事件流的 Redis db 一并清空,用例之间互不可见
+    import redis as redis_py
+
+    redis_py.Redis.from_url(os.environ["APITEST_REDIS_URL"]).flushdb()
 
 
 @pytest.fixture(scope="module")

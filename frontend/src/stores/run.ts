@@ -126,6 +126,81 @@ export const useRunStore = defineStore('run', () => {
     await refresh(runId, client)
   }
 
+  // ── SSE 实时进度(架构设计 §6):事件流为主,轮询降级 ────────────────
+  const streaming = ref(false)
+  let source: StreamSource | null = null
+  let streamHandlers: Array<[string, EventListener]> = []
+
+  /** 事件源只需监听/关闭这一子集:原生 EventSource 天然满足,
+   * 测试注入假事件源(完整 EventSource 接口在 jsdom 里没有)。 */
+  interface StreamSource {
+    addEventListener(type: string, listener: EventListener): void
+    removeEventListener(type: string, listener: EventListener): void
+    close(): void
+  }
+  type EventSourceFactory = (url: string) => StreamSource
+
+  function defaultEventSourceFactory(url: string): EventSource {
+    return new EventSource(url)
+  }
+
+  function handleRunStarted(payload: { started_at: string | null }): void {
+    if (run.value === null) return
+    run.value = { ...run.value, status: 'running', started_at: payload.started_at }
+  }
+
+  function handleRunFinished(
+    runId: string,
+    client: ApiClient,
+    payload: { status: string; summary: RunOut['summary'] },
+  ): void {
+    if (run.value !== null) {
+      run.value = { ...run.value, status: payload.status, summary: payload.summary }
+    }
+    stopStream()
+    // 重拉一次:用数据库权威行替换运行期依据事件合成的状态
+    void refresh(runId, client)
+  }
+
+  /** 订阅报告详情的事件流:先 refresh 打底(已终态则不必订阅),
+   * 无原生 EventSource 的环境(jsdom)直接降级为轮询。 */
+  async function startStream(
+    runId: string,
+    client: ApiClient = api,
+    eventSourceFactory: EventSourceFactory = defaultEventSourceFactory,
+  ): Promise<void> {
+    stopStream()
+    stopPolling()
+    await refresh(runId, client)
+    if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) return
+    if (eventSourceFactory === defaultEventSourceFactory && typeof EventSource === 'undefined') {
+      startPolling(runId, client)
+      return
+    }
+
+    const es = eventSourceFactory(`/api/v1/runs/${runId}/events`)
+    source = es
+    streaming.value = true
+    const onStarted = (e: MessageEvent) => handleRunStarted(JSON.parse(e.data))
+    const onFinished = (e: MessageEvent) => handleRunFinished(runId, client, JSON.parse(e.data))
+    streamHandlers = [
+      ['run.started', onStarted as EventListener],
+      ['run.finished', onFinished as EventListener],
+    ]
+    for (const [name, handler] of streamHandlers) es.addEventListener(name, handler)
+  }
+
+  /** 先摘回调再关闭:关闭后迟到的错误/事件不改变状态。 */
+  function stopStream(): void {
+    if (source === null) return
+    const es = source
+    source = null
+    for (const [name, handler] of streamHandlers) es.removeEventListener(name, handler)
+    streamHandlers = []
+    es.close()
+    streaming.value = false
+  }
+
   // ── 上次执行用的环境:弹窗默认选中(按项目记) ────────────────────
   function lastEnvId(projectId: number): number | null {
     const raw = localStorage.getItem(lastEnvKey(projectId))
@@ -141,6 +216,7 @@ export const useRunStore = defineStore('run', () => {
     steps,
     stepsTruncated,
     polling,
+    streaming,
     runItems,
     nextCursor,
     listLoading,
@@ -152,6 +228,8 @@ export const useRunStore = defineStore('run', () => {
     reset,
     startPolling,
     stopPolling,
+    startStream,
+    stopStream,
     cancel,
     lastEnvId,
     rememberEnv,

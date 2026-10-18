@@ -27,7 +27,9 @@ from app.engine import EngineContext, execute as engine_execute
 from app.engine.dsl import parse_dsl
 from app.engine.results import StepResult, response_size
 from app.engine.variables import compose_scope_variables
+from app.event_names import RUN_FINISHED, RUN_STARTED
 from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
+from app.run_events import StreamPublisher
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -123,6 +125,8 @@ def execute_run(self, run_id: str) -> None:
     settings = get_settings()
     worker_id = f"{socket.gethostname()}:{uuid.uuid4()}"
     sync_engine = make_sync_engine(settings.database_url_sync)
+    # 进度事件发布器:在 Redis 客户端创建前崩溃则保持 None,兜底路径跳过发布
+    publisher: StreamPublisher | None = None
     try:
         with make_sync_session_factory(sync_engine)() as session:
             run = session.get(Run, uuid.UUID(run_id))
@@ -148,6 +152,12 @@ def execute_run(self, run_id: str) -> None:
 
             redis_client = redis_py.Redis.from_url(settings.redis_url)
             cancellation = RedisCancellationToken(redis_client, f"run:cancel:{run_id}")
+            publisher = StreamPublisher(
+                redis_client,
+                run_id,
+                max_len=settings.run_stream_max_len,
+                ttl_seconds=settings.run_stream_ttl_seconds,
+            )
             sink = DbSink(
                 session, run.id, worker_id,
                 {i: step.type for i, step in enumerate(dsl.steps)},
@@ -157,11 +167,18 @@ def execute_run(self, run_id: str) -> None:
                 # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用
                 return httpx.AsyncClient(follow_redirects=True, verify=verify)
 
+            # run.started 由任务层发:started_at 已取回 DB 时间,步数来自锁定的版本
+            publisher.publish(
+                RUN_STARTED,
+                {"total_steps": len(dsl.steps), "started_at": run.started_at.isoformat()},
+            )
+
             context = EngineContext(
                 sink=sink,
                 http_client_factory=http_client_factory,
                 project_variables=project_vars,
                 environment_variables=env_vars,
+                publisher=publisher,
                 cancellation=cancellation,
                 body_max_bytes=settings.body_max_bytes,
             )
@@ -193,6 +210,8 @@ def execute_run(self, run_id: str) -> None:
                 "pass_rate": round(summary.passed / executed, 3) if executed else 0,
             }
             session.commit()
+            # run.finished 由任务层发(与 run.started 成对):漏发会让前端永久挂起
+            publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
     except OwnershipLost:
         return
     except Exception:
@@ -211,5 +230,8 @@ def execute_run(self, run_id: str) -> None:
             "assertion_total": 0, "assertion_passed": 0,
         }
         session.commit()
+        # 崩溃兜底路径同样要发终态事件:订阅端才知道该收尾了
+        if publisher is not None:
+            publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
     finally:
         sync_engine.dispose()

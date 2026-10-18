@@ -1,19 +1,24 @@
-"""执行触发 / 状态查询 / 取消。执行结果查询的完整报告端点在 T9。"""
+"""执行触发 / 状态查询 / 取消 / SSE 实时进度事件流。"""
 
 import base64
 import datetime
 import json
 import uuid
+from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Query, Response
+import redis.asyncio as redis_async
+from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import func, select, tuple_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.deps import get_current_user, get_db
 from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import ConflictError, ValidationFailedError, not_found
+from app.event_names import TERMINAL_EVENT
 from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
+from app.run_events import stream_key
 from app.schemas.runs import (
     CancelAck,
     RequestSnapshotOut,
@@ -261,3 +266,58 @@ async def cancel_run(
     run.status = "stopped" if run.status == "pending" else "stopping"
     await session.flush()
     return CancelAck(run_id=run.id, status=run.status)
+
+
+async def _ensure_run_exists(run_id: uuid.UUID, request: Request) -> None:
+    """流开始前的 404 判定,用短会话即用即释。
+
+    SSE 端点不能用 yield 依赖的请求级会话:其清理在流结束后才跑,
+    会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在响应开始前
+    运行,404 在流开始前返回。
+    """
+    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
+    async with factory() as session:
+        await _get_run_or_404(session, run_id)
+
+
+@router.get("/{run_id}/events", response_class=EventSourceResponse)
+async def stream_run_events(
+    run_id: uuid.UUID,
+    response: Response,
+    _run: None = Depends(_ensure_run_exists),
+) -> AsyncIterator[ServerSentEvent]:
+    """SSE 实时进度事件流(架构设计 §6 / API设计 §5)。
+
+    #23 骨架:从流首重放,收到执行终态事件即关闭 —— 已结束的执行重放
+    完全部事件后自然收尾,运行中的执行推到终态为止。快照补偿 /
+    Last-Event-ID 续传 / ?events= 过滤在后续票落地。
+
+    生成器端点由 FastAPI 路由层编码为 SSE 并自带 15 秒保活;每个连接
+    自建异步 Redis 客户端(绑定当前事件循环,不跨连接复用),断开时
+    finally 释放。
+    """
+    settings = get_settings()
+    # X-Accel-Buffering: no —— 生产 nginx 不缓冲 SSE;Cache-Control 禁中间层缓存
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+
+    client = redis_async.Redis.from_url(settings.redis_url)
+    try:
+        key = stream_key(run_id)
+        last_id = "0"
+        while True:
+            batches = await client.xread({key: last_id}, block=10_000, count=100)
+            for _stream, messages in batches or ():
+                for message_id, fields in messages:
+                    last_id = message_id
+                    event = fields[b"event"].decode()
+                    # data 已是 JSON 字符串,用 raw_data 原样透传,避免二次编码
+                    yield ServerSentEvent(
+                        raw_data=fields[b"data"].decode(),
+                        event=event,
+                        id=message_id.decode(),
+                    )
+                    if event == TERMINAL_EVENT:
+                        return  # 终态即关:浏览器侧不再挂着连接
+    finally:
+        await client.aclose()

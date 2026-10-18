@@ -44,7 +44,6 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
     timed_out = False
     fail_fast_hit = False
     try:
-        context.publisher.publish("run.started", {"total_steps": len(dsl.steps)})
         for index, step in enumerate(dsl.steps):
             # ── 协作检查点(§10):步骤开始前 ─────────────────────────
             if not cancelled and context.cancellation.cancelled():
@@ -93,7 +92,8 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
 
     duration_ms = (time.perf_counter() - start) * 1000
     summary = _summarize(results, duration_ms, cancelled=cancelled, timed_out=timed_out)
-    context.publisher.publish("run.finished", {"status": summary.status})
+    # 执行级事件(run.started/run.finished)由任务层发布:started_at 是数据库
+    # 时间、summary 含断言统计,引擎不掌握这些事实 —— 引擎只发逐步事件
     return summary
 
 
