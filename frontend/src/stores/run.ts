@@ -99,6 +99,8 @@ export const useRunStore = defineStore('run', () => {
     run.value = null
     steps.value = []
     stepsTruncated.value = false
+    progress.value = null
+    runningStep.value = null
   }
 
   let timer: ReturnType<typeof setInterval> | null = null
@@ -142,6 +144,10 @@ export const useRunStore = defineStore('run', () => {
 
   // ── SSE 实时进度(架构设计 §6):事件流为主,轮询降级 ────────────────
   const streaming = ref(false)
+  // 运行期状态:进度(已完成/总数)与正在执行的步骤 —— 只由事件驱动,
+  // 统计卡仍只由汇总数据驱动(不从步骤事件合成)
+  const progress = ref<{ completed: number; total: number } | null>(null)
+  const runningStep = ref<{ stepIndex: number; stepName: string; stepType: string } | null>(null)
   let source: StreamSource | null = null
   let streamHandlers: Array<[string, EventListener]> = []
   // 当前订阅的 run(null = 无活跃订阅)。await 恢复点与事件回调都校验它:
@@ -161,9 +167,42 @@ export const useRunStore = defineStore('run', () => {
     return new EventSource(url)
   }
 
-  function handleRunStarted(payload: { started_at: string | null }): void {
+  function handleRunStarted(payload: { started_at: string | null; total_steps: number }): void {
     if (run.value === null) return
     run.value = { ...run.value, status: 'running', started_at: payload.started_at }
+    progress.value = { completed: 0, total: payload.total_steps }
+  }
+
+  /** step.finished 按 step_index 幂等 upsert:快照路径下可能重复投递,无害。
+   * 运行期合成行只有摘要字段(请求/响应明细终态重拉后由数据库行补齐)。 */
+  function upsertStep(payload: {
+    step_index: number
+    step_name: string
+    status: string
+    duration_ms: number | null
+    assertion_total: number
+    assertion_passed: number
+  }): void {
+    const row: StepOut = {
+      // 负数哨兵 id:行 key 是 step_index,id 只需不与真实行冲突
+      id: -(payload.step_index + 1),
+      step_index: payload.step_index,
+      step_name: payload.step_name,
+      step_type: runningStep.value?.stepType ?? 'http',
+      status: payload.status,
+      duration_ms: payload.duration_ms ?? 0,
+      request: null,
+      response: null,
+      extracted_variables: {},
+      assertions: [],
+      assertion_total: payload.assertion_total,
+      assertion_passed: payload.assertion_passed,
+      error_message: null,
+    }
+    const idx = steps.value.findIndex((s) => s.step_index === payload.step_index)
+    if (idx >= 0) steps.value.splice(idx, 1, row)
+    else steps.value.push(row)
+    runningStep.value = null
   }
 
   function handleRunFinished(
@@ -174,6 +213,8 @@ export const useRunStore = defineStore('run', () => {
     if (run.value !== null) {
       run.value = { ...run.value, status: payload.status, summary: payload.summary }
     }
+    runningStep.value = null
+    progress.value = null
     stopStream()
     // 重拉一次:用数据库权威行替换运行期依据事件合成的状态
     void refresh(runId, client)
@@ -218,11 +259,31 @@ export const useRunStore = defineStore('run', () => {
     const onStarted = (e: MessageEvent) => {
       if (streamRunId === runId) handleRunStarted(JSON.parse(e.data))
     }
+    const onStepStarted = (e: MessageEvent) => {
+      if (streamRunId !== runId) return
+      const payload: { step_index: number; step_name: string; step_type: string } = JSON.parse(
+        e.data,
+      )
+      runningStep.value = {
+        stepIndex: payload.step_index,
+        stepName: payload.step_name,
+        stepType: payload.step_type,
+      }
+    }
+    const onStepFinished = (e: MessageEvent) => {
+      if (streamRunId === runId) upsertStep(JSON.parse(e.data))
+    }
+    const onProgress = (e: MessageEvent) => {
+      if (streamRunId === runId) progress.value = JSON.parse(e.data)
+    }
     const onFinished = (e: MessageEvent) => {
       if (streamRunId === runId) handleRunFinished(runId, client, JSON.parse(e.data))
     }
     streamHandlers = [
       ['run.started', onStarted as EventListener],
+      ['step.started', onStepStarted as EventListener],
+      ['step.finished', onStepFinished as EventListener],
+      ['run.progress', onProgress as EventListener],
       ['run.finished', onFinished as EventListener],
     ]
     for (const [name, handler] of streamHandlers) es.addEventListener(name, handler)
@@ -256,6 +317,8 @@ export const useRunStore = defineStore('run', () => {
     stepsTruncated,
     polling,
     streaming,
+    progress,
+    runningStep,
     runItems,
     nextCursor,
     listLoading,

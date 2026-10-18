@@ -9,7 +9,7 @@ import logging
 
 import pytest
 
-from app.event_names import RUN_FINISHED, RUN_STARTED
+from app.event_names import RUN_FINISHED, RUN_PROGRESS, RUN_STARTED, STEP_FINISHED
 from app.run_events import FINISHED_TTL_SECONDS, StreamPublisher, stream_key
 
 
@@ -83,3 +83,75 @@ def test_payload_always_json_serializable(payload):
     client = FakeRedis()
     make_publisher(client).publish("any.event", payload)
     json.loads(client.added[0][1]["data"])
+
+
+class FakeClock:
+    """假时钟:测试里手动推进,验证限流窗口。"""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestProgressThrottle:
+    """run.progress 的 1 秒限流是投递策略,归发布器;completed == total 恒放行。"""
+
+    def make_throttled(self, interval_ms: int = 1000):
+        client = FakeRedis()
+        clock = FakeClock()
+        publisher = StreamPublisher(
+            client, "run-1", progress_interval_ms=interval_ms, clock=clock
+        )
+        return publisher, client, clock
+
+    def test_progress_within_interval_is_suppressed(self):
+        publisher, client, clock = self.make_throttled()
+        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
+        clock.advance(0.5)
+        publisher.publish(RUN_PROGRESS, {"completed": 2, "total": 10})
+
+        assert len(client.added) == 1  # 0.5s 内的第二条被限流吞掉
+
+    def test_progress_after_interval_passes(self):
+        publisher, client, clock = self.make_throttled()
+        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
+        clock.advance(1.0)
+        publisher.publish(RUN_PROGRESS, {"completed": 2, "total": 10})
+
+        assert len(client.added) == 2
+
+    def test_terminal_progress_always_passes(self):
+        publisher, client, clock = self.make_throttled()
+        publisher.publish(RUN_PROGRESS, {"completed": 9, "total": 10})
+        clock.advance(0.0)
+        publisher.publish(RUN_PROGRESS, {"completed": 10, "total": 10})
+
+        assert len(client.added) == 2  # completed == total 恒放行
+
+    def test_first_progress_always_passes(self):
+        publisher, client, _ = self.make_throttled()
+        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
+
+        assert len(client.added) == 1
+
+    def test_throttle_only_applies_to_progress_events(self):
+        """其他事件不受限流:限流是 run.progress 的投递策略,不是发布器的全局行为。"""
+        publisher, client, clock = self.make_throttled()
+        publisher.publish(STEP_FINISHED, {"step_index": 0})
+        clock.advance(0.0)
+        publisher.publish(STEP_FINISHED, {"step_index": 1})
+
+        assert len(client.added) == 2
+
+    def test_interval_configurable(self):
+        publisher, client, clock = self.make_throttled(interval_ms=100)
+        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
+        clock.advance(0.2)
+        publisher.publish(RUN_PROGRESS, {"completed": 2, "total": 10})
+
+        assert len(client.added) == 2

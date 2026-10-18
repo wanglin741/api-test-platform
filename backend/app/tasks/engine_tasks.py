@@ -178,6 +178,7 @@ def execute_run(self, run_id: str) -> None:
                 run_id,
                 max_len=settings.run_stream_max_len,
                 ttl_seconds=settings.run_stream_ttl_seconds,
+                progress_interval_ms=settings.run_progress_interval_ms,
             )
             sink = DbSink(
                 session, run.id, worker_id,

@@ -371,6 +371,65 @@ describe('runStore.startStream', () => {
     expect(runFetches).toBe(2) // 打底 1 次 + 终态重拉 1 次
   })
 
+  it('执行期事件:运行中步骤、幂等 upsert、进度推进', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    const source = FakeEventSource.instances[0]!
+
+    source.emit('run.started', { total_steps: 3, started_at: '2026-01-01T00:00:05Z' })
+    expect(store.progress).toEqual({ completed: 0, total: 3 })
+
+    source.emit('step.started', { step_index: 0, step_name: '登录', step_type: 'http' })
+    expect(store.runningStep).toEqual({ stepIndex: 0, stepName: '登录', stepType: 'http' })
+
+    // 运行期合成行:摘要字段(明细终态重拉后由数据库行补齐)
+    source.emit('step.finished', {
+      step_index: 0,
+      step_name: '登录',
+      status: 'passed',
+      duration_ms: 12,
+      assertion_total: 2,
+      assertion_passed: 2,
+    })
+    expect(store.steps).toHaveLength(1)
+    expect(store.steps[0]).toMatchObject({
+      step_index: 0,
+      status: 'passed',
+      assertion_total: 2,
+    })
+    expect(store.runningStep).toBeNull() // 步骤结束,不再有运行中的步骤
+
+    // 重复投递同一步骤:幂等 upsert,不出现重复行
+    source.emit('step.finished', {
+      step_index: 0,
+      step_name: '登录',
+      status: 'passed',
+      duration_ms: 13,
+      assertion_total: 2,
+      assertion_passed: 2,
+    })
+    expect(store.steps).toHaveLength(1)
+    expect(store.steps[0]?.duration_ms).toBe(13)
+
+    source.emit('run.progress', { completed: 1, total: 3 })
+    expect(store.progress).toEqual({ completed: 1, total: 3 })
+  })
+
+  it('reset:清空运行期进度与运行中步骤', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    const source = FakeEventSource.instances[0]!
+    source.emit('run.started', { total_steps: 2, started_at: null })
+    source.emit('step.started', { step_index: 0, step_name: 's', step_type: 'http' })
+
+    store.reset()
+
+    expect(store.progress).toBeNull()
+    expect(store.runningStep).toBeNull()
+  })
+
   it('打开已终态的执行:不开流也不轮询', async () => {
     setActivePinia(createPinia())
     const client = mockClient({

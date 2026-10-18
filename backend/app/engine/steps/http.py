@@ -22,6 +22,7 @@ from app.engine.dsl import RequestBody, StepSpec
 from app.engine.extractors import ExtractionFailure, extract_value
 from app.engine.results import RequestSnapshot, ResponseSnapshot, StepResult
 from app.engine.variables import VariableResolutionError, VariableScope, stringify
+from app.event_names import STEP_STARTED
 
 CANCEL_POLL_INTERVAL = 0.2  # 分段 sleep 的检查粒度(§10)
 CONNECT_POOL_TIMEOUT = 5.0  # 连接 / 连接池超时上限(§9 超时层次)
@@ -96,8 +97,9 @@ async def run_http_step(
     context: EngineContext,
     client: httpx.AsyncClient,
     default_timeout_ms: int,
+    step_index: int = 0,
 ) -> StepResult:
-    result = StepResult(step_id=step.id, step_name=step.name, step_index=0, status="passed")
+    result = StepResult(step_id=step.id, step_name=step.name, step_index=step_index, status="passed")
 
     if not step.enabled:
         result.status = "skipped"
@@ -131,6 +133,15 @@ async def run_http_step(
             result.status = "error"
             result.error_message = f"请求体不是合法 JSON: {exc}"
             return result
+
+        # 步骤真正开始(构建成功、即将发请求)才发 step.started:跳过与
+        # 构建失败都没有「开始」;重试不重发。事件归属引擎(逐步事实),
+        # 载荷字段与落库列同源(step_index/step_name/step_type)
+        if attempt == 1:
+            context.publisher.publish(
+                STEP_STARTED,
+                {"step_index": step_index, "step_name": step.name, "step_type": step.type},
+            )
 
         if prepared.content_type and not any(
             k.lower() == "content-type" for k in headers

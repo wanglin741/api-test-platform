@@ -84,12 +84,13 @@ const durationText = () => {
 }
 
 // 快照明细按步骤展开/收起(前端设计 §6.2:先扫统计,再对失败步骤逐个看现场)
+// key 用 step_index:运行期事件合成行与终态数据库行切换时 key 稳定,展开态不丢
 const expanded = ref<Set<number>>(new Set())
 
 function toggleStep(step: StepOut): void {
   const next = new Set(expanded.value)
-  if (next.has(step.id)) next.delete(step.id)
-  else next.add(step.id)
+  if (next.has(step.step_index)) next.delete(step.step_index)
+  else next.add(step.step_index)
   expanded.value = next
 }
 </script>
@@ -158,14 +159,30 @@ function toggleStep(step: StepOut): void {
     />
 
     <div class="step-list">
+      <!-- 执行期实时行:进度连续推进 + 正在执行的步骤(事件流驱动) -->
+      <div v-if="runStore.progress || runStore.runningStep" class="live-line">
+        <el-progress
+          v-if="runStore.progress"
+          class="live-progress"
+          :percentage="Math.round((runStore.progress.completed / runStore.progress.total) * 100)"
+          :stroke-width="8"
+        />
+        <span class="live-text">
+          {{
+            runStore.runningStep
+              ? `正在执行第 ${runStore.runningStep.stepIndex + 1} 步:${runStore.runningStep.stepName}`
+              : `${runStore.progress?.completed ?? 0}/${runStore.progress?.total ?? 0} 已完成`
+          }}
+        </span>
+      </div>
       <div
         v-for="step in runStore.steps"
-        :key="step.id"
+        :key="step.step_index"
         class="step-row"
         :class="{ 'is-bad': step.status === 'failed' || step.status === 'error' }"
       >
         <div class="row-head" @click="toggleStep(step)">
-          <el-icon class="chevron" :class="{ open: expanded.has(step.id) }">
+          <el-icon class="chevron" :class="{ open: expanded.has(step.step_index) }">
             <ArrowRight />
           </el-icon>
           <el-tag :type="statusTag(step.status)" size="small">{{ step.status }}</el-tag>
@@ -176,7 +193,7 @@ function toggleStep(step: StepOut): void {
           <span class="duration">{{ step.duration_ms }}ms</span>
         </div>
 
-        <div v-if="expanded.has(step.id)" class="step-detail">
+        <div v-if="expanded.has(step.step_index)" class="step-detail">
           <el-alert
             v-if="step.error_message"
             class="row-error"
@@ -264,6 +281,22 @@ function toggleStep(step: StepOut): void {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.live-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.live-progress {
+  width: 200px;
+}
+
+.live-text {
+  color: var(--el-color-primary);
+  font-size: 13px;
 }
 
 .step-row {

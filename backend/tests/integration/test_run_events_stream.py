@@ -9,8 +9,8 @@ import uuid
 from datetime import datetime
 
 
-async def _setup_and_run(client, url: str) -> str:
-    """建项目 + 环境 + 用例(单步 http)并触发执行(eager 同步跑完),返回 run_id。"""
+async def _setup_and_run(client, url: str, dsl: dict | None = None) -> str:
+    """建项目 + 环境 + 用例并触发执行(eager 同步跑完),返回 run_id。"""
     from tests.integration.test_cases import _dsl
 
     project = (await client.post("/api/v1/projects", json={"name": "事件流项目"})).json()
@@ -23,7 +23,7 @@ async def _setup_and_run(client, url: str) -> str:
     case = (
         await client.post(
             f"/api/v1/projects/{project['id']}/cases",
-            json={"name": "单步用例", "dsl": _dsl(url=url)},
+            json={"name": "单步用例", "dsl": dsl or _dsl(url=url)},
         )
     ).json()
     resp = await client.post(
@@ -165,3 +165,44 @@ async def test_redelivery_of_terminal_run_publishes_run_finished(client, local_s
     finished = [fields for _, fields in stream if fields[b"event"] == b"run.finished"]
     assert len(finished) == 2  # 原始 + 重投补发(重复终态对客户端幂等无害)
     assert json.loads(finished[-1][b"data"])["status"] == "success"
+
+
+async def test_stream_step_events_match_execution(client, local_server):
+    """逐步事件与实际执行对应:跳过的步骤只有 step.finished,进度推进到总数。"""
+
+    def two_step_dsl(url: str) -> dict:
+        return {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {"id": "s1", "name": "第一步", "type": "http",
+                 "request": {"method": "GET", "url": url}},
+                # 引用未定义变量 → 跳过(没有「开始」)
+                {"id": "s2", "name": "第二步", "type": "http",
+                 "request": {"method": "GET", "url": url + "/{{missing_var}}"}},
+            ],
+        }
+
+    run_id = await _setup_and_run(client, f"{local_server}/json", dsl=two_step_dsl(f"{local_server}/json"))
+
+    events, _ = await _read_sse(client, run_id)
+
+    names = [e["event"] for e in events if e["event"] != "run.started"]
+    # 第一步:开始→结束→进度;第二步(跳过):结束→进度;末尾 run.finished
+    assert names == [
+        "step.started", "step.finished", "run.progress",
+        "step.finished", "run.progress",
+        "run.finished",
+    ]
+
+    finished_first = json.loads(events[2]["data"])
+    assert finished_first["step_index"] == 0
+    assert finished_first["step_name"] == "第一步"
+    assert finished_first["status"] == "passed"
+
+    skipped = json.loads(events[4]["data"])
+    assert skipped["step_index"] == 1
+    assert skipped["status"] == "skipped"
+
+    progress_events = [json.loads(e["data"]) for e in events if e["event"] == "run.progress"]
+    assert progress_events == [{"completed": 1, "total": 2}, {"completed": 2, "total": 2}]

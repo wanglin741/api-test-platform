@@ -19,7 +19,7 @@ from app.engine.dsl import CaseDSL
 from app.engine.results import RunStatus, RunSummary, StepResult
 from app.engine.steps.http import run_http_step
 from app.engine.variables import VariableScope
-from app.event_names import STEP_FINISHED
+from app.event_names import RUN_PROGRESS, STEP_FINISHED
 
 
 async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
@@ -71,7 +71,7 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
             else:
                 result = await run_http_step(
                     step, scope, context, _client_for(step.request.verify_ssl),
-                    dsl.config.timeout_ms,
+                    dsl.config.timeout_ms, step_index=index,
                 )
                 result.step_index = index
                 if (
@@ -83,9 +83,22 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
             results.append(result)
             # 每步立即回调,不批量缓冲(§11)—— 长跑期间轮询可见部分结果
             context.sink.on_step_finished(result)
+            # 载荷字段对齐落库列与步骤出参(step_index 而非 index);限流是
+            # 发布器的投递策略,引擎每步都发进度,单测保持确定性
+            passed = sum(1 for a in result.assertions if a.passed)
             context.publisher.publish(
                 STEP_FINISHED,
-                {"step_id": step.id, "index": index, "status": result.status},
+                {
+                    "step_index": index,
+                    "step_name": result.step_name,
+                    "status": result.status,
+                    "duration_ms": result.duration_ms,
+                    "assertion_total": len(result.assertions),
+                    "assertion_passed": passed,
+                },
+            )
+            context.publisher.publish(
+                RUN_PROGRESS, {"completed": index + 1, "total": len(dsl.steps)}
             )
     finally:
         for client in clients.values():

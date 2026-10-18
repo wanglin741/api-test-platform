@@ -15,12 +15,14 @@
 
 import json
 import logging
+import time
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import redis as redis_py
 
-from app.event_names import RUN_FINISHED
+from app.event_names import RUN_FINISHED, RUN_PROGRESS
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +47,21 @@ class StreamPublisher:
         *,
         max_len: int = 10_000,
         ttl_seconds: int = 86_400,
+        progress_interval_ms: int = 1000,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._key = stream_key(run_id)
         self._max_len = max_len
         self._ttl_seconds = ttl_seconds
+        self._progress_interval_ms = progress_interval_ms
+        self._clock = clock
+        # -inf:第一条进度必发;步骤串行 ⇒ 发布无并发,限流状态无需加锁
+        self._last_progress_at = float("-inf")
 
     def publish(self, event: str, payload: dict[str, Any]) -> None:
+        if not self._progress_allowed(event, payload):
+            return
         try:
             self._client.xadd(
                 self._key,
@@ -67,3 +77,17 @@ class StreamPublisher:
             logger.warning(
                 "run %s 进度事件 %s 发布失败,前端将降级轮询", self._key, event, exc_info=True
             )
+
+    def _progress_allowed(self, event: str, payload: dict[str, Any]) -> bool:
+        """run.progress 的限流是投递策略,不是引擎逻辑:引擎每步都发。
+        completed == total 恒放行 —— 客户端至少能看到终态进度。
+        """
+        if event != RUN_PROGRESS:
+            return True
+        if payload.get("completed") == payload.get("total"):
+            return True
+        now = self._clock()
+        if (now - self._last_progress_at) * 1000 < self._progress_interval_ms:
+            return False
+        self._last_progress_at = now
+        return True
