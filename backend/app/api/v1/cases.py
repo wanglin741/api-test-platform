@@ -311,10 +311,10 @@ async def debug_step(
     context = EngineContext(
         sink=InMemorySink(),
         # run_http_step 直接使用显式传入的 client,factory/sink 是 EngineContext 的必填契约位
-        http_client_factory=lambda verify: httpx.AsyncClient(follow_redirects=True, verify=verify),
+        http_client_factory=lambda verify: httpx.AsyncClient(follow_redirects=True, verify=verify, trust_env=False),
         body_max_bytes=settings.body_max_bytes,  # 与报告链路同一截断阈值
     )
-    async with httpx.AsyncClient(follow_redirects=True, verify=step.request.verify_ssl) as client:
+    async with httpx.AsyncClient(follow_redirects=True, verify=step.request.verify_ssl, trust_env=False) as client:
         try:
             result = await run_http_step(step, scope, context, client, dsl.config.timeout_ms)
         except Exception as exc:

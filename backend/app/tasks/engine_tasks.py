@@ -186,8 +186,11 @@ def execute_run(self, run_id: str) -> None:
             )
 
             def http_client_factory(verify: bool = True) -> httpx.AsyncClient:
-                # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用
-                return httpx.AsyncClient(follow_redirects=True, verify=verify)
+                # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用。
+                # trust_env=False:执行流量直达配置的 base_url,不读系统/环境代理
+                # (httpx 在 Windows 会读注册表系统代理,宿主机开着代理时
+                #  不可达目标会变成代理的 502 响应,连接失败语义被吞掉)。
+                return httpx.AsyncClient(follow_redirects=True, verify=verify, trust_env=False)
 
             # run.started 由任务层发:started_at 已取回 DB 时间,步数来自锁定的版本
             publisher.publish(
