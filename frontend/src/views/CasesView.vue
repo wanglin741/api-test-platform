@@ -106,7 +106,12 @@ async function submit() {
         ],
       },
     }
-    const created = await caseStore.create(currentId.value, payload)
+    const created = await caseStore.create(
+      currentId.value,
+      payload,
+      api,
+      selectedFolder.value, // 重载列表沿用当前目录过滤,树与表保持一致
+    )
     dialogVisible.value = false
     if (created) router.push(`/cases/${created.id}`)
   } catch {

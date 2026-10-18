@@ -46,7 +46,7 @@ const RUN_A = {
   duration_ms: 120,
   summary: {
     status: 'success',
-    total_steps: 2,
+    total: 2,
     passed: 1,
     failed: 1,
     errored: 0,

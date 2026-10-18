@@ -14,6 +14,7 @@ from app.engine.variables import (
     VariableCycleError,
     VariableDepthError,
     VariableScope,
+    compose_scope_variables,
 )
 
 
@@ -191,3 +192,20 @@ class TestRuntimeLayer:
         scope = make_scope()
         scope.set("token", "fresh")
         assert scope.resolve("Bearer {{token}}") == "Bearer fresh"
+
+
+class TestComposeScopeVariables:
+    """worker(真实执行)与单步调试共用的变量合成规则 —— 规则只在这一份。"""
+
+    def test_project_and_current_env_classified(self) -> None:
+        rows = [("token", "p", None), ("host", "dev", 1), ("host", "prod", 2)]
+        project, env = compose_scope_variables(rows, 1, None)
+        assert project == {"token": "p"}
+        assert env == {"host": "dev"}
+
+    def test_base_url_fallback_only_when_undefined(self) -> None:
+        _, env = compose_scope_variables([], 1, "http://from-env")
+        assert env == {"base_url": "http://from-env"}
+
+        _, env = compose_scope_variables([("base_url", "http://explicit", 1)], 1, "http://from-env")
+        assert env == {"base_url": "http://explicit"}

@@ -128,6 +128,13 @@ describe('CasesView', () => {
     const [, opts] = post.mock.calls[0] as [string, { body: { name: string; folder_id: number } }]
     expect(opts.body.name).toBe('下单链路')
     expect(opts.body.folder_id).toBe(2)
+    // 成功后重载列表沿用当前目录过滤,树与表一致
+    const [reloadPath, reloadOpts] = get.mock.calls.at(-1) as [
+      string,
+      { params: { query: Record<string, number | undefined> } },
+    ]
+    expect(reloadPath).toContain('/cases')
+    expect(reloadOpts.params.query.folder_id).toBe(2)
     expect(push).toHaveBeenCalledWith('/cases/1')
   })
 

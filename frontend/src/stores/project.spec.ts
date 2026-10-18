@@ -73,11 +73,42 @@ describe('projectStore', () => {
     expect(localStorage.getItem('apitest.current-project-id')).toBe('2')
   })
 
-  it('新建会话时恢复上次选择的项目', () => {
+  it('刷新恢复上次选择:load 后仅当 id 仍在列表中才生效', async () => {
     localStorage.setItem('apitest.current-project-id', '7')
     setActivePinia(createPinia())
+    const client = mockClient({
+      GET: vi.fn(async () => okResponse([{ id: 7, name: '老项目' }])),
+    })
+
+    await useProjectStore().load(client)
 
     expect(useProjectStore().currentId).toBe(7)
+  })
+
+  it('恢复的 id 已不存在(如 seed 重置):回落到列表第一个,不再拿失效 id 请求', async () => {
+    localStorage.setItem('apitest.current-project-id', '2')
+    setActivePinia(createPinia())
+    const client = mockClient({
+      GET: vi.fn(async () => okResponse([{ id: 1, name: '示例项目' }])),
+    })
+    const store = useProjectStore()
+
+    await store.load(client)
+
+    expect(store.currentId).toBe(1)
+    expect(localStorage.getItem('apitest.current-project-id')).toBe('1')
+  })
+
+  it('列表为空:currentId 清空并移除持久化', async () => {
+    localStorage.setItem('apitest.current-project-id', '9')
+    setActivePinia(createPinia())
+    const client = mockClient({ GET: vi.fn(async () => okResponse([])) })
+    const store = useProjectStore()
+
+    await store.load(client)
+
+    expect(store.currentId).toBeNull()
+    expect(localStorage.getItem('apitest.current-project-id')).toBeNull()
   })
 
   it('create:POST 后重载列表并选中新项目', async () => {

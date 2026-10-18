@@ -9,6 +9,7 @@ worker 全程同步 Session + psycopg(D6):AsyncClient 只在协程内部创建,
 
 import asyncio
 import hashlib
+import logging
 import socket
 import time
 import uuid
@@ -25,8 +26,11 @@ from app.db.session import make_sync_engine, make_sync_session_factory
 from app.engine import EngineContext, execute as engine_execute
 from app.engine.dsl import parse_dsl
 from app.engine.results import StepResult, response_size
+from app.engine.variables import compose_scope_variables
 from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
 from app.tasks.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 class OwnershipLost(Exception):
@@ -103,20 +107,15 @@ class DbSink:
 
 
 def _load_variables(session: Session, run: Run) -> tuple[dict, dict]:
-    project_vars: dict = {}
-    env_vars: dict = {}
     rows = session.execute(
-        select(Variable).where(Variable.project_id == run.project_id)
-    ).scalars()
-    for var in rows:
-        if var.environment_id is None:
-            project_vars[var.name] = var.value
-        elif var.environment_id == run.environment_id:
-            env_vars[var.name] = var.value
+        select(Variable.name, Variable.value, Variable.environment_id).where(
+            Variable.project_id == run.project_id
+        )
+    ).all()
     environment = session.get(Environment, run.environment_id)
-    if environment is not None and environment.base_url:
-        env_vars.setdefault("base_url", environment.base_url)
-    return project_vars, env_vars
+    return compose_scope_variables(
+        rows, run.environment_id, environment.base_url if environment else None
+    )
 
 
 @celery_app.task(name="engine.execute_run", bind=True)
@@ -199,6 +198,8 @@ def execute_run(self, run_id: str) -> None:
     except Exception:
         # 兜底:引擎意外崩溃(理论上 DSL 深校验后不应发生)也不能把 run 永远留在
         # running —— 报告页会无限轮询。落 error 终态,明细以已落库的为准。
+        # 任务本身被吞成成功,堆栈必须留在日志里,否则崩溃无从排查。
+        logger.exception("run %s 引擎意外崩溃,落 error 终态", run_id)
         session.rollback()
         run = session.get(Run, uuid.UUID(run_id))
         if run is None or run.worker_id != worker_id or run.status in RUN_TERMINAL_STATUSES:

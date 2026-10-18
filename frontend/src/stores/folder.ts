@@ -51,11 +51,18 @@ export const useFolderStore = defineStore('folder', () => {
   const tree = computed<FolderNode[]>(() => buildTree(folders.value))
 
   async function load(id: number, client: ApiClient = api): Promise<void> {
-    const { data } = await client.GET('/api/v1/projects/{project_id}/folders', {
-      params: { path: { project_id: id } },
-    })
-    projectId.value = id
-    folders.value = Array.isArray(data) ? data : []
+    try {
+      const { data } = await client.GET('/api/v1/projects/{project_id}/folders', {
+        params: { path: { project_id: id } },
+      })
+      projectId.value = id
+      folders.value = Array.isArray(data) ? data : []
+    } catch (exc) {
+      // 失败即清空:保留上一个项目的状态,树显示旧目录、写操作还会落到旧项目
+      projectId.value = null
+      folders.value = []
+      throw exc
+    }
   }
 
   async function reload(client: ApiClient): Promise<void> {
@@ -63,7 +70,7 @@ export const useFolderStore = defineStore('folder', () => {
   }
 
   async function create(payload: FolderCreateInput, client: ApiClient = api): Promise<void> {
-    if (projectId.value === null) return
+    if (projectId.value === null) throw new Error('项目未加载,无法创建目录') // 向上抛,不让调用方误以为成功
     await client.POST('/api/v1/projects/{project_id}/folders', {
       params: { path: { project_id: projectId.value } },
       body: { scope: 'case', sort_order: 0, ...payload },

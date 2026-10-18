@@ -35,9 +35,10 @@ function envName(environmentId: number): string {
 
 function passRate(item: (typeof runItems.value)[number]): string {
   const summary = item.summary
-  if (!summary || typeof summary.total_steps !== 'number') return '-'
+  // 键名与 engine_tasks 落库一致(total,非 total_steps),对齐报告详情页统计卡
+  if (!summary || typeof summary.total !== 'number') return '-'
   const passed = typeof summary.passed === 'number' ? summary.passed : 0
-  return `${passed}/${summary.total_steps}`
+  return `${passed}/${summary.total}`
 }
 
 function openRun(runId: string) {

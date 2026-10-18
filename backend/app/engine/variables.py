@@ -25,6 +25,31 @@ _RANDOM_STRING = re.compile(r"^\$randomString\((\d+)\)$")
 MAX_RESOLVE_DEPTH = 5
 
 
+def compose_scope_variables(
+    rows, current_environment_id: int | None, base_url: str | None
+) -> tuple[dict, dict]:
+    """项目级/环境级变量合成 —— 全平台唯一实现,worker 与单步调试共用。
+
+    rows 是 (name, value, environment_id) 三元组:environment_id 为 None 归项目级,
+    等于 current_environment_id 的归环境级,其余环境对本项目不可见;
+    base_url 兜底只在环境配置了它且变量未显式定义 base_url 时注入(显式优先)。
+
+    两处调用:app.tasks.engine_tasks._load_variables(同步 Session,真实执行)与
+    app.api.v1.cases._load_scope_variables(AsyncSession,单步调试)。
+    变量合成规则见执行引擎设计 §3 —— 调整规则只改这里,不得在调用侧自创。
+    """
+    project_vars: dict = {}
+    env_vars: dict = {}
+    for name, value, environment_id in rows:
+        if environment_id is None:
+            project_vars[name] = value
+        elif environment_id == current_environment_id:
+            env_vars[name] = value
+    if base_url:
+        env_vars.setdefault("base_url", base_url)
+    return project_vars, env_vars
+
+
 def stringify(value: Any) -> str:
     """变量值转字符串。bool 走 JSON 语义(true/false),None 为空串。"""
     if value is True:

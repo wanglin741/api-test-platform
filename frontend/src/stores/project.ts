@@ -26,7 +26,9 @@ export const useProjectStore = defineStore('project', () => {
   const items = ref<Project[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
-  const currentId = ref<number | null>(readStoredId())
+  // localStorage 的 id 不同步恢复:seed 重置后它可能已不存在,先恢复会让各页面
+  // 拿失效 id 请求而 404。load() 与服务端列表核对后才生效,失效则回落。
+  const currentId = ref<number | null>(null)
 
   const current = computed(() => items.value.find((p) => p.id === currentId.value) ?? null)
 
@@ -36,6 +38,15 @@ export const useProjectStore = defineStore('project', () => {
     try {
       const { data } = await client.GET('/api/v1/projects')
       items.value = data ?? []
+      const stored = readStoredId()
+      const exists = (id: number | null) => id !== null && items.value.some((p) => p.id === id)
+      currentId.value = exists(currentId.value)
+        ? currentId.value
+        : exists(stored)
+          ? stored
+          : (items.value[0]?.id ?? null)
+      if (currentId.value === null) localStorage.removeItem(CURRENT_KEY)
+      else localStorage.setItem(CURRENT_KEY, String(currentId.value))
     } catch (exc) {
       error.value = exc instanceof Error ? exc.message : String(exc)
     } finally {

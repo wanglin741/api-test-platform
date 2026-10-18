@@ -53,12 +53,14 @@ export const useCaseStore = defineStore('case', () => {
     projectId: number,
     payload: CaseCreate,
     client: ApiClient = api,
+    // 成功后重载列表沿用当前目录过滤,树与表才一致(同 selectFolder/turnPage)
+    folderId: number | null = null,
   ): Promise<CaseDetail | null> {
     const { data } = await client.POST('/api/v1/projects/{project_id}/cases', {
       params: { path: { project_id: projectId } },
       body: payload,
     })
-    await load(projectId, client, page.value)
+    await load(projectId, client, page.value, folderId)
     return data ?? null
   }
 

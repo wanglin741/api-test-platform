@@ -19,7 +19,7 @@ from app.engine.defaults import InMemorySink
 from app.engine.dsl import parse_dsl
 from app.engine.results import StepResult, response_size
 from app.engine.steps.http import run_http_step
-from app.engine.variables import VariableScope
+from app.engine.variables import VariableScope, compose_scope_variables
 from app.models import Environment, Folder, Project, TestCase, TestCaseVersion, User, Variable
 from app.schemas.cases import (
     CaseCreate,
@@ -259,23 +259,20 @@ async def _load_scope_variables(
 ) -> tuple[dict, dict]:
     """加载项目级/环境级变量(含 base_url 兜底)。
 
-    与 app.tasks.engine_tasks._load_variables 语义一致,那边是同步 Session(worker),
-    这边是 AsyncSession(API)—— 引擎的变量合成规则见执行引擎设计,两处都不得自创。
+    合成规则在 app.engine.variables.compose_scope_variables(唯一实现,
+    与 app.tasks.engine_tasks._load_variables 共用);这边只负责 AsyncSession 取数。
     """
-    project_vars: dict = {}
-    env_vars: dict = {}
     rows = (
-        await session.scalars(select(Variable).where(Variable.project_id == project_id))
+        await session.execute(
+            select(Variable.name, Variable.value, Variable.environment_id).where(
+                Variable.project_id == project_id
+            )
+        )
     ).all()
-    for var in rows:
-        if var.environment_id is None:
-            project_vars[var.name] = var.value
-        elif var.environment_id == environment_id:
-            env_vars[var.name] = var.value
     environment = await session.get(Environment, environment_id)
-    if environment is not None and environment.base_url:
-        env_vars.setdefault("base_url", environment.base_url)
-    return project_vars, env_vars
+    return compose_scope_variables(
+        rows, environment_id, environment.base_url if environment else None
+    )
 
 
 @router.post("/{case_id}/steps/{step_id}/debug", response_model=StepDebugOut)

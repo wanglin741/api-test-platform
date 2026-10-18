@@ -8,7 +8,6 @@ import type { ApiClient } from '@/api/client'
 
 import CaseDetailView from './CaseDetailView.vue'
 import DslEditor from '@/components/DslEditor.vue'
-import { useProjectStore } from '@/stores/project'
 
 const { push, get, patch, post } = vi.hoisted(() => ({
   push: vi.fn(),
@@ -67,9 +66,16 @@ async function mountView(pinia = createPinia()) {
   return wrapper
 }
 
+/** 详情页加载会同时打两个 GET:环境列表 + 用例详情,按路径分流。 */
+function mockDetailGet(body: unknown, environments: unknown[] = []) {
+  get.mockImplementation((path: string) =>
+    Promise.resolve(okResponse(path.includes('/environments') ? environments : body)),
+  )
+}
+
 describe('CaseDetailView', () => {
   it('载入详情:名称与 DSL 渲染进编辑器', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     const wrapper = await mountView()
 
     expect((wrapper.find('.header input').element as HTMLInputElement).value).toBe('登录链路')
@@ -77,7 +83,7 @@ describe('CaseDetailView', () => {
   })
 
   it('保存:PATCH 提交名称 + 解析后的 dsl(规范化补齐默认值),版本号随之更新', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     const saved = { ...DETAIL, current_version: 3 }
     patch.mockResolvedValue(okResponse(saved))
     const wrapper = await mountView()
@@ -99,7 +105,7 @@ describe('CaseDetailView', () => {
   })
 
   it('编排视图编辑 URL:改动同步进 dsl,随 PATCH 提交', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     patch.mockResolvedValue(okResponse({ ...DETAIL, current_version: 3 }))
     const wrapper = await mountView()
 
@@ -119,7 +125,7 @@ describe('CaseDetailView', () => {
   })
 
   it('脏步骤:编辑后左列表出小圆点,保存后消失', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     patch.mockResolvedValue(okResponse({ ...DETAIL, current_version: 3 }))
     const wrapper = await mountView()
 
@@ -143,7 +149,7 @@ describe('CaseDetailView', () => {
         ],
       },
     }
-    get.mockResolvedValue(okResponse(TWO_STEPS))
+    mockDetailGet(TWO_STEPS)
     patch.mockResolvedValue(okResponse({ ...TWO_STEPS, current_version: 3 }))
     const wrapper = await mountView()
 
@@ -163,20 +169,11 @@ describe('CaseDetailView', () => {
   })
 
   it('单步调试:先保存脏改动再调同步端点,结果渲染进调试面板', async () => {
-    get.mockImplementation((path: string) => {
-      if (path.includes('/environments')) {
-        return Promise.resolve(
-          okResponse([{ id: 3, name: 'staging', base_url: 'http://x', is_default: false }]),
-        )
-      }
-      return Promise.resolve(okResponse(DETAIL))
-    })
+    // 环境按用例自己的 project_id 加载(而非全局 currentId),下拉取到该项目的环境
+    mockDetailGet(DETAIL, [{ id: 3, name: 'staging', base_url: 'http://x', is_default: false }])
     patch.mockResolvedValue(okResponse({ ...DETAIL, current_version: 3 }))
     post.mockResolvedValue(okResponse(DEBUG_RESULT))
-    const pinia = createPinia()
-    setActivePinia(pinia)
-    useProjectStore().currentId = 1
-    const wrapper = await mountView(pinia)
+    const wrapper = await mountView()
 
     // 先弄脏:调试端点执行已保存版本,脏改动必须先落库
     await wrapper.find('.step-detail .url input').setValue('https://api.example.com/now')
@@ -200,7 +197,7 @@ describe('CaseDetailView', () => {
   })
 
   it('改名后保存:新名称随 PATCH 提交', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     patch.mockResolvedValue(okResponse({ ...DETAIL, name: '下单主链路', current_version: 3 }))
     const wrapper = await mountView()
 
@@ -214,7 +211,7 @@ describe('CaseDetailView', () => {
   })
 
   it('保存返回 dsl_invalid:回显每条校验错误,不弹全局错误也能看到明细', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     patch.mockRejectedValueOnce(
       new ApiError('DSL 结构校验失败', 'dsl_invalid', 422, {
         errors: [
@@ -235,7 +232,7 @@ describe('CaseDetailView', () => {
   })
 
   it('编辑器内容不是合法 JSON:标出语法错误,不发 PATCH', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     const wrapper = await mountView()
 
     wrapper.findComponent(DslEditor).vm.$emit('update:modelValue', '{oops')
@@ -248,7 +245,7 @@ describe('CaseDetailView', () => {
   })
 
   it('源码有语法错误:阻止切回步骤视图,合法后恢复切换', async () => {
-    get.mockResolvedValue(okResponse(DETAIL))
+    mockDetailGet(DETAIL)
     const wrapper = await mountView()
 
     await wrapper.find('#tab-source').trigger('click')

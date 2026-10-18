@@ -21,7 +21,6 @@ import StepDetail from '@/components/StepDetail.vue'
 import TriggerDialog from '@/components/TriggerDialog.vue'
 import { useCaseStore } from '@/stores/case'
 import { useEnvironmentStore } from '@/stores/environment'
-import { useProjectStore } from '@/stores/project'
 import { useTriggerDialog } from '@/composables/trigger-dialog'
 import { newStep, nextStepId, normalizeDsl, parseDslText, toDslText } from '@/types/dsl'
 
@@ -40,7 +39,6 @@ const route = useRoute()
 const router = useRouter()
 const caseStore = useCaseStore()
 const environmentStore = useEnvironmentStore()
-const projectStore = useProjectStore()
 
 // ── 执行(与报告列表「再次执行」共用接线) ────────────────────────
 const {
@@ -118,9 +116,10 @@ onMounted(async () => {
       snapshotDsl()
       selectedStepId.value = dsl.value.steps[0]?.id ?? null
     }
-    // 顶部常驻环境选择器(调试目标);与变量页共用环境 store 的选中态
-    if (projectStore.currentId !== null) {
-      await environmentStore.load(projectStore.currentId, api)
+    // 顶部常驻环境选择器(调试目标);与变量页共用环境 store 的选中态。
+    // 按用例自己的 project_id 加载 —— 直链打开时全局 currentId 可能是别的项目
+    if (detail.value) {
+      await environmentStore.load(detail.value.project_id, api)
       debugEnvId.value ??= environmentStore.selectedId
     }
   } finally {
