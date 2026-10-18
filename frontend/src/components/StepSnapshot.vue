@@ -45,6 +45,17 @@ function pretty(text: string | null | undefined): string {
   }
 }
 
+/** 期望/实际/提取值可能是对象或数组:JSON 序列化展示,别渲染成 [object Object] */
+function display(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === null || value === undefined) return ''
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
+}
+
 const responseBody = computed(() => pretty(props.response?.body))
 const requestBody = computed(() => pretty(props.request?.body))
 
@@ -111,8 +122,8 @@ const extractedEntries = computed(() => Object.entries(props.extracted))
         <el-tag :type="a.passed ? 'success' : 'danger'" size="small">
           {{ a.passed ? 'PASS' : 'FAIL' }}
         </el-tag>
-        <code class="assert-expr">{{ a.type }} {{ a.operator }} {{ a.expected }}</code>
-        <span class="actual">实际:{{ a.actual }}</span>
+        <code class="assert-expr">{{ a.type }} {{ a.operator }} {{ display(a.expected) }}</code>
+        <span class="actual">实际:{{ display(a.actual) }}</span>
         <span v-if="a.message" class="hint">{{ a.message }}</span>
       </div>
       <el-empty v-if="assertSummary.total === 0" description="该步骤没有断言" :image-size="60" />
@@ -120,7 +131,7 @@ const extractedEntries = computed(() => Object.entries(props.extracted))
     <el-tab-pane :label="`提取(${extractedEntries.length})`">
       <div v-for="[k, v] in extractedEntries" :key="k" class="assert-row">
         <el-tag size="small" type="success">{{ k }}</el-tag>
-        <code>{{ String(v) }}</code>
+        <code>{{ display(v) }}</code>
       </div>
       <el-empty v-if="extractedEntries.length === 0" description="未提取变量" :image-size="60" />
     </el-tab-pane>

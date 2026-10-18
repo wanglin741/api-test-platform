@@ -228,3 +228,115 @@ class TestAssertionFailureSemantics:
         assert sink.results[0].status == "failed"
         assert sink.results[0].error_message is not None
         assert summary.status == "failed"  # failed 与 error 是两类终态
+
+
+class TestMalformedExpression:
+    """用户写错表达式是常态:断言/提取失败,而不是引擎崩溃把 run 卡在 running。"""
+
+    async def test_malformed_jsonpath_assertion_fails_gracefully(
+        self, sink: InMemorySink
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return json_response(200, {"a": 1})
+
+        doc = {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {
+                    "id": "s1", "name": "s1", "type": "http",
+                    "request": {"method": "GET", "url": "https://api.example.com/x"},
+                    "assert": [
+                        {"type": "jsonpath", "operator": "eq", "expected": 1,
+                         "expression": "$.a["}
+                    ],
+                },
+            ],
+        }
+        summary = await execute(parse_dsl(doc), make_context(sink, handler))
+
+        result = sink.results[0]
+        assert result.status == "failed"
+        assert result.request is not None and result.response is not None  # 现场保留
+        assert result.assertions[0].passed is False
+        assert "不合法" in (result.assertions[0].message or "")
+        assert summary.status == "failed"
+
+    async def test_required_extract_with_malformed_jsonpath_fails_step(
+        self, sink: InMemorySink
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return json_response(200, {"a": 1})
+
+        doc = {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {
+                    "id": "s1", "name": "s1", "type": "http",
+                    "request": {"method": "GET", "url": "https://api.example.com/x"},
+                    "extract": [
+                        {"name": "bad", "type": "jsonpath", "expression": "$.a["}
+                    ],
+                },
+            ],
+        }
+        summary = await execute(parse_dsl(doc), make_context(sink, handler))
+
+        assert sink.results[0].status == "failed"
+        assert "不合法" in (sink.results[0].error_message or "")
+        assert summary.status == "failed"
+
+    async def test_optional_extract_with_malformed_jsonpath_skips_later_ref(
+        self, sink: InMemorySink
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return json_response(200, {"a": 1})
+
+        doc = {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {
+                    "id": "s1", "name": "s1", "type": "http",
+                    "request": {"method": "GET", "url": "https://api.example.com/x"},
+                    "extract": [
+                        {"name": "bad", "type": "jsonpath", "expression": "$.a[",
+                         "required": False}
+                    ],
+                },
+                {
+                    "id": "s2", "name": "s2", "type": "http",
+                    "request": {"method": "GET", "url": "https://api.example.com/{{bad}}"},
+                },
+            ],
+        }
+        summary = await execute(parse_dsl(doc), make_context(sink, handler))
+
+        assert [r.status for r in sink.results] == ["passed", "skipped"]
+        assert summary.status == "success"
+
+    async def test_invalid_regex_pattern_fails_assertion_not_crash(
+        self, sink: InMemorySink
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return json_response(200, {})
+
+        doc = {
+            "dsl_version": 1,
+            "config": {},
+            "steps": [
+                {
+                    "id": "s1", "name": "s1", "type": "http",
+                    "request": {"method": "GET", "url": "https://api.example.com/x"},
+                    "assert": [
+                        {"type": "status_code", "operator": "regex_match", "expected": "["}
+                    ],
+                },
+            ],
+        }
+        summary = await execute(parse_dsl(doc), make_context(sink, handler))
+
+        result = sink.results[0]
+        assert result.status == "failed"
+        assert "正则表达式不合法" in (result.assertions[0].message or "")

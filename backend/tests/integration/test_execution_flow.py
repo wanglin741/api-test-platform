@@ -179,3 +179,30 @@ async def test_worker_ownership_and_idempotency(client, local_server):
 
     got = await client.get(f"/api/v1/runs/{run['run_id']}")
     assert got.json()["status"] == "success"
+
+
+async def test_engine_crash_lands_run_in_error_terminal_state(
+    client, local_server, monkeypatch
+):
+    """引擎意外崩溃的兜底:run 落 error 终态,而不是永远卡在 running(报告页无限轮询)。"""
+    from app.tasks import engine_tasks
+
+    project_id, env_id, case_id = await _setup(client, url=f"{local_server}/json")
+
+    async def boom(dsl, context):
+        raise RuntimeError("引擎炸了")
+
+    monkeypatch.setattr(engine_tasks, "engine_execute", boom)
+
+    triggered = (
+        await client.post(
+            f"/api/v1/projects/{project_id}/runs",
+            json={"case_id": case_id, "environment_id": env_id},
+        )
+    ).json()
+
+    got = await client.get(f"/api/v1/runs/{triggered['run_id']}")
+    run = got.json()
+    assert run["status"] == "error"
+    assert run["finished_at"] is not None
+    assert run["summary"]["error"] == 1

@@ -12,6 +12,7 @@ from typing import Any
 
 import orjson
 from jsonpath_ng import parse as jsonpath_parse
+from jsonpath_ng.exceptions import JsonPathParserError
 
 from app.engine.dsl import AssertSpec
 from app.engine.results import AssertionResult, ResponseSnapshot
@@ -127,7 +128,11 @@ def _resolve_source(spec: AssertSpec, response: ResponseSnapshot | None, duratio
             raise _SourceFailure(
                 f"响应体不是 JSON,无法按 {spec.expression} 取值"
             ) from None
-        matches = jsonpath_parse(spec.expression).find(data)
+        try:
+            matches = jsonpath_parse(spec.expression).find(data)
+        except JsonPathParserError as exc:
+            # 表达式不合法是用户输入错误:该断言不通过,而不是让整个 run 崩溃
+            raise _SourceFailure(f"JSONPath 表达式不合法 {spec.expression!r}: {exc}") from None
         if not matches:
             raise _SourceFailure(f"JSONPath {spec.expression} 未命中")
         return matches[0].value
@@ -158,6 +163,11 @@ def evaluate(
 
     try:
         passed = compare(actual, spec.operator, spec.expected)
+    except re.error as exc:  # 正则表达式不合法
+        return AssertionResult(
+            type=spec.type, operator=spec.operator, expected=spec.expected,
+            actual=actual, passed=False, message=f"正则表达式不合法: {exc}",
+        )
     except ValueError as exc:  # 未知操作符
         return AssertionResult(
             type=spec.type, operator=spec.operator, expected=spec.expected,

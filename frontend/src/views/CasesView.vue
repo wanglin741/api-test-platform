@@ -53,7 +53,8 @@ async function submit() {
     const payload: CaseCreate = {
       name: form.name.trim(),
       priority: form.priority as CaseCreate['priority'],
-      // 后端要求 steps 至少 1 步;给可执行的占位步骤,进入详情页后由编辑器改写
+      // 后端要求 steps 至少 1 步;占位步骤默认禁用 —— 否则用户没改它就执行,
+      // 每次跑批都会真发一个出网请求(httpbin.org)
       dsl: {
         dsl_version: 1,
         steps: [
@@ -61,6 +62,7 @@ async function submit() {
             id: 'step-1',
             name: '示例步骤',
             type: 'http',
+            enabled: false,
             request: { method: 'GET', url: 'https://httpbin.org/get' },
           },
         ],

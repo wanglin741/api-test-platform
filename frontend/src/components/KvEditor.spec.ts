@@ -50,6 +50,15 @@ describe('KvEditor', () => {
     expect(model).toEqual({ name: 'x' })
   })
 
+  it('改键名:null 值保持 null,不写回字符串化的 "null"', async () => {
+    const model: Record<string, unknown> = { token: null }
+    const wrapper = await mountEditor(model)
+
+    await wrapper.find('.row .key input').setValue('TOKEN')
+
+    expect(model).toEqual({ TOKEN: null })
+  })
+
   it('删除行:同步删 dict 键', async () => {
     const model: Record<string, unknown> = { a: 1 }
     const wrapper = await mountEditor(model)

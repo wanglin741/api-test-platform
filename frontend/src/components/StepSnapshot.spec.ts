@@ -103,6 +103,30 @@ describe('StepSnapshot', () => {
     expect(wrapper.text()).toContain('提取(0)')
   })
 
+  it('对象/数组型的期望值与实际值:JSON 序列化展示,不渲染成 [object Object]', async () => {
+    const wrapper = await mountSnapshot({
+      request: REQUEST,
+      response: RESPONSE,
+      assertions: [
+        {
+          type: 'jsonpath',
+          operator: 'eq',
+          expected: { code: 0 },
+          actual: { code: 500 },
+          passed: false,
+          message: null,
+        },
+      ],
+      extracted: { payload: { token: 'abc' } },
+    })
+
+    const text = wrapper.text()
+    expect(text).toContain('{"code":0}')
+    expect(text).toContain('{"code":500}')
+    expect(text).not.toContain('[object Object]')
+    expect(text).toContain('{"token":"abc"}')
+  })
+
   it('layout 透传到分栏容器(none 时响应 pane 隐藏)', async () => {
     const wrapper = await mountSnapshot({ request: REQUEST, response: RESPONSE, layout: 'none' })
 

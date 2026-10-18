@@ -196,5 +196,19 @@ def execute_run(self, run_id: str) -> None:
             session.commit()
     except OwnershipLost:
         return
+    except Exception:
+        # 兜底:引擎意外崩溃(理论上 DSL 深校验后不应发生)也不能把 run 永远留在
+        # running —— 报告页会无限轮询。落 error 终态,明细以已落库的为准。
+        session.rollback()
+        run = session.get(Run, uuid.UUID(run_id))
+        if run is None or run.worker_id != worker_id or run.status in RUN_TERMINAL_STATUSES:
+            return
+        run.status = "error"
+        run.finished_at = func.now()
+        run.summary = {
+            "total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0,
+            "assertion_total": 0, "assertion_passed": 0,
+        }
+        session.commit()
     finally:
         sync_engine.dispose()

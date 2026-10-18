@@ -44,9 +44,10 @@ def build_request_timeout(
 
 
 def build_body(body: RequestBody, scope: VariableScope) -> PreparedBody:
-    if body.content is None:
+    if body.content is None or (isinstance(body.content, str) and body.content.strip() == ""):
         # 声明了 body 类型但没有内容:不发请求体
-        # (否则 json 会发出字面量 "null"、raw 发出 "None" —— build_body(None) 探针确认过)
+        # (否则 json 会发出字面量 "null"/orjson.loads('') 报错、raw 发出 "None";
+        #  前端表单清空文本时给的是空串,同样按无内容处理)
         return PreparedBody()
 
     if body.type == "json":

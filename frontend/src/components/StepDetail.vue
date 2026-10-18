@@ -61,7 +61,7 @@ const bodyText = computed<string>({
   },
   set(text) {
     const body = step.value.request.body
-    // 清空保持 '':置 null 会让引擎把字面量 "None"/"null" 当请求体发出去
+    // 清空保持 '':引擎对 None/空串一律不发请求体(见后端 build_body),无需特判
     if (body) body.content = text
   },
 })

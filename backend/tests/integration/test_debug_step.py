@@ -145,8 +145,11 @@ async def test_debug_request_query_snapshot_resolved(client, local_server):
     assert body["request"]["query"] == {"q": "world", "page": "2"}
 
 
-async def test_debug_engine_exception_becomes_step_error_not_500(client, local_server):
-    """坏 JSONPath 表达式等非 TransportError 异常:步骤级 error,而非 500。"""
+async def test_debug_malformed_jsonpath_is_step_failure_with_snapshots(
+    client, local_server
+):
+    """坏 JSONPath 表达式:引擎降级为断言失败(不是 500,也不再抛异常),
+    请求/响应快照保留 —— 用户能看到现场去改表达式。"""
     dsl = _debug_dsl(f"{local_server}/json")
     dsl["steps"][0]["assert"] = [
         {"type": "jsonpath", "operator": "eq", "expected": 1, "expression": "$.a["}
@@ -158,8 +161,33 @@ async def test_debug_engine_exception_becomes_step_error_not_500(client, local_s
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
+    assert body["status"] == "failed"
+    assert body["request"] is not None and body["response"] is not None
+    assert body["assertions"][0]["passed"] is False
+    assert "不合法" in body["assertions"][0]["message"]
+
+
+async def test_debug_engine_crash_becomes_step_error_not_500(
+    client, local_server, monkeypatch
+):
+    """引擎真抛意外异常:端点兜底转步骤级 error,而非 500。"""
+    import app.api.v1.cases as cases_module
+
+    async def boom(step, scope, context, http_client, timeout_ms):
+        raise RuntimeError("引擎炸了")
+
+    monkeypatch.setattr(cases_module, "run_http_step", boom)
+
+    dsl = _debug_dsl(f"{local_server}/json")
+    project_id, env_id, case_id = await _setup(client, dsl)
+
+    resp = await client.post(
+        f"/api/v1/cases/{case_id}/steps/s1/debug?environment_id={env_id}"
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
     assert body["status"] == "error"
-    assert body["error_message"] is not None
+    assert "RuntimeError" in body["error_message"]
 
 
 async def test_debug_environment_must_belong_to_case_project(client, local_server):

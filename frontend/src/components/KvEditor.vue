@@ -26,10 +26,12 @@ watch(model, () => {
 
 function editKey(row: KvRow, newKey: string) {
   if (row.key && row.key !== newKey) {
-    // 改名只搬引用:值取原 dict 里的原始值(类型不动),不用行上的字符串化副本
+    // 改名只搬引用:值取原 dict 里的原始值(类型不动),不用行上的字符串化副本。
+    // 判存在不能用 ??(null 值会被误判成缺失,写回字符串化的 "null")
+    const hadOriginal = row.key in model.value
     const original = model.value[row.key]
     delete model.value[row.key]
-    if (newKey) model.value[newKey] = original ?? row.value
+    if (newKey) model.value[newKey] = hadOriginal ? original : row.value
   } else if (!row.key && newKey) {
     model.value[newKey] = row.value
   }

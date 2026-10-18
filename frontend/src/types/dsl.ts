@@ -166,8 +166,14 @@ export function normalizeDsl(raw: unknown): CaseDsl {
       const s = asRecord(step)
       const request = asRecord(s.request)
       const retry = asRecord(s.retry)
+      // 后端 StepSpec 字段名是 assertions(alias: assert,populate_by_name):
+      // 手写 DSL 用 assertions 也能过保存,这里收编成表单用的 assert,
+      // 并把 spread 里的 assertions 键删掉 —— 两个键并存时后端别名优先,
+      // 新注入的空 assert 会覆盖掉用户真正的断言
+      const { assertions: legacyAssert, ...stepRest } = s
+      const rawAssert = Array.isArray(s.assert) ? s.assert : (legacyAssert ?? [])
       return {
-        ...s,
+        ...stepRest,
         id: asString(s.id),
         name: asString(s.name),
         type: 'http' as const,
@@ -192,17 +198,19 @@ export function normalizeDsl(raw: unknown): CaseDsl {
             ...spec,
             name: asString(spec.name),
             type: asString(spec.type, 'jsonpath') as ExtractType,
-            expression: asString(spec.expression),
+            // 缺失/非法保持 null(后端按「缺少 expression」处理);转 '' 会让
+            // 引擎去 parse 空表达式
+            expression: typeof spec.expression === 'string' ? spec.expression : null,
             required: spec.required !== false,
           }
         }),
-        assert: (Array.isArray(s.assert) ? s.assert : []).map((a) => {
+        assert: (Array.isArray(rawAssert) ? rawAssert : []).map((a) => {
           const spec = asRecord(a)
           return {
             ...spec,
             type: asString(spec.type, 'status_code') as AssertType,
             operator: asString(spec.operator, 'eq') as AssertOperator,
-            expression: asString(spec.expression),
+            expression: typeof spec.expression === 'string' ? spec.expression : null,
             message: asString(spec.message),
           }
         }),
