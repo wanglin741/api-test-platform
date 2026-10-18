@@ -83,7 +83,8 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
             results.append(result)
             # 每步立即回调,不批量缓冲(§11)—— 长跑期间轮询可见部分结果
             context.sink.on_step_finished(result)
-            # 载荷字段对齐落库列与步骤出参(step_index 而非 index);限流是
+            # 载荷字段对齐落库列与步骤出参(step_index 而非 index、step_type
+            # 来自 DSL 与落库列同源、duration_ms 与 DbSink 同取整);限流是
             # 发布器的投递策略,引擎每步都发进度,单测保持确定性
             passed = sum(1 for a in result.assertions if a.passed)
             context.publisher.publish(
@@ -91,8 +92,9 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
                 {
                     "step_index": index,
                     "step_name": result.step_name,
+                    "step_type": step.type,
                     "status": result.status,
-                    "duration_ms": result.duration_ms,
+                    "duration_ms": None if result.duration_ms is None else int(result.duration_ms),
                     "assertion_total": len(result.assertions),
                     "assertion_passed": passed,
                 },

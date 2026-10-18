@@ -323,7 +323,7 @@ data: {"status": "success", "summary": {...}}
 |---|---|---|
 | `run.started` | 执行开始(任务层发) | `{total_steps, started_at}` |
 | `step.started` | 步骤构建成功、真正发请求前(引擎发) | `{step_index, step_name, step_type}` |
-| `step.finished` | 步骤结束(引擎发) | `{step_index, step_name, status, duration_ms, assertion_total, assertion_passed}` |
+| `step.finished` | 步骤结束(引擎发) | `{step_index, step_name, step_type, status, duration_ms, assertion_total, assertion_passed}`(duration_ms 为整数毫秒;被跳过的步骤不发 `step.started`,类型随本事件下发) |
 | `run.progress` | 每步之后(**限流 1/s,限流在发布器**) | `{completed, total}` |
 | `run.finished` | 进入终态(任务层发) | `{status, summary}` |
 | `run.snapshot` | 首连/游标失效时(SSE 端点发) | `{run, steps, steps_truncated}` |

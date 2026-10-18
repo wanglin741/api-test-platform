@@ -546,6 +546,91 @@ describe('runStore.startStream', () => {
     expect(source.closed).toBe(true)
     expect(store.streaming).toBe(false)
     expect(store.polling).toBe(true) // 降级轮询,页面功能不中断
+    expect(store.progress).toBeNull() // 运行期状态随流清除,不残留冻结进度条
+    expect(store.runningStep).toBeNull()
+  })
+
+  it('step.finished 重复投递:合并而非整行替换,快照明细不丢', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+    // 首连快照:步骤 0 是落库行,含请求/响应/提取/断言明细
+    FakeEventSource.instances[0]!.emit('run.snapshot', {
+      run: { ...RUN_RUNNING },
+      steps: [
+        {
+          id: 11,
+          step_index: 0,
+          step_name: '登录',
+          step_type: 'http',
+          status: 'passed',
+          duration_ms: 9,
+          request: { method: 'GET', url: 'https://x' },
+          response: { status_code: 200 },
+          extracted_variables: { token: 't' },
+          assertions: [{ passed: true }],
+          assertion_total: 1,
+          assertion_passed: 1,
+        },
+      ],
+      steps_truncated: false,
+    })
+
+    // 服务端先取流尾再读数据库:快照窗口内已结束步骤的 finish 事件还会重放
+    FakeEventSource.instances[0]!.emit('step.finished', {
+      step_index: 0,
+      step_name: '登录',
+      step_type: 'http',
+      status: 'passed',
+      duration_ms: 10,
+      assertion_total: 1,
+      assertion_passed: 1,
+    })
+
+    // 摘要字段以事件为准,明细字段以已有行为准
+    expect(store.steps).toHaveLength(1)
+    expect(store.steps[0]).toMatchObject({
+      id: 11,
+      duration_ms: 10,
+      request: { method: 'GET', url: 'https://x' },
+      response: { status_code: 200 },
+      extracted_variables: { token: 't' },
+      assertions: [{ passed: true }],
+    })
+  })
+
+  it('run.finished 的终态重拉在途时切换报告:迟到响应不覆盖新报告', async () => {
+    setActivePinia(createPinia())
+    let releaseA!: () => void
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    let runGets = 0
+    const clientA = mockClient({
+      GET: vi.fn(async (path: unknown) => {
+        if (String(path).includes('/steps')) {
+          return okResponse({ items: [], count: 0, truncated: false })
+        }
+        runGets += 1
+        if (runGets === 1) return okResponse(RUN_RUNNING) // 打底
+        await gateA // 终态重拉:悬挂到用户切走之后
+        return okResponse({ ...RUN_RUNNING, status: 'error', summary: { total: 1, error: 1 } })
+      }),
+    })
+    const store = useRunStore()
+    await store.startStream('r-1', clientA, (url) => new FakeEventSource(url))
+
+    FakeEventSource.instances[0]!.emit('run.finished', {
+      status: 'error',
+      summary: { total: 1, error: 1 },
+    })
+    // 重拉在途,用户切到报告 r-2(reset + 新订阅都递增 epoch)
+    store.reset()
+    await store.startStream('r-2', streamClient(), (url) => new FakeEventSource(url))
+    releaseA()
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(store.run?.status).toBe('running') // 仍是 r-2 打底的状态,A 的迟到行被守卫拦截
   })
 
   it('open 清零失败计数:两次失败 → 成功 → 两次失败不降级', async () => {

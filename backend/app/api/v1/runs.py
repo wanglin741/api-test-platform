@@ -12,13 +12,13 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.deps import SEED_USERNAME, get_current_user, get_db
+from app.api.deps import get_current_user, get_db, load_current_user
 from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
 from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
 from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
-from app.run_events import stream_key
+from app.run_events import finished_payload, stream_key
 from app.schemas.runs import (
     CancelAck,
     RequestSnapshotOut,
@@ -288,19 +288,14 @@ async def _ensure_run_stream_access(
     SSE 端点不能用 yield 依赖(get_db / get_current_user):其清理在流
     结束后才跑,会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在
     响应开始前运行,认证失败 / 404 / 非法过滤值都在流开始前返回 ——
-    生成器体里的异常无法变成 400。认证查询与 get_current_user 保持
-    同一缝(SEED_USERNAME),真实认证落地时同步换。返回过滤白名单。
+    生成器体里的异常无法变成 400。认证查询经 deps.load_current_user
+    与 get_current_user 同源(认证唯一改动点不因本端点破例)。
+    返回过滤白名单。
     """
     allowed = _resolve_event_filter(events)
     factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
     async with factory() as session:
-        result = await session.execute(select(User).where(User.username == SEED_USERNAME))
-        if result.scalar_one_or_none() is None:
-            raise AppError(
-                status_code=500,
-                code="seed_user_missing",
-                message="种子用户不存在,请确认迁移已执行",
-            )
+        await load_current_user(session)
         await _get_run_or_404(session, run_id)
     return allowed
 
@@ -312,9 +307,14 @@ IDLE_DB_CHECK_SECONDS = 60.0
 
 
 def _parse_stream_id(raw: str) -> tuple[int, int] | None:
-    """「毫秒-序号」拆成数值对:游标比较必须按数值,按字符串比会错序。"""
+    """「毫秒-序号」拆成数值对:游标比较必须按数值,按字符串比会错序。
+
+    isascii() 先行:isdigit() 对非 ASCII 数字字符(如 '²')也为真,
+    而 int() 会抛 ValueError —— 游标是外部输入,坏值必须走快照回退
+    而不是在生成器体里炸掉整个流。
+    """
     ms, sep, seq = raw.partition("-")
-    if not sep or not ms.isdigit() or not seq.isdigit():
+    if not sep or not (ms.isascii() and ms.isdigit()) or not (seq.isascii() and seq.isdigit()):
         return None
     return int(ms), int(seq)
 
@@ -401,7 +401,7 @@ async def stream_run_events(
                 # 终态在流里可能已被裁剪:用数据库事实补发,连接自然收尾
                 yield ServerSentEvent(
                     raw_data=json.dumps(
-                        {"status": run.status, "summary": run.summary},
+                        finished_payload(run.status, run.summary),
                         ensure_ascii=False,
                         default=str,
                     ),
@@ -426,7 +426,7 @@ async def stream_run_events(
                     if run is not None and run.status in RUN_TERMINAL_STATUSES:
                         yield ServerSentEvent(
                             raw_data=json.dumps(
-                                {"status": run.status, "summary": run.summary},
+                                finished_payload(run.status, run.summary),
                                 ensure_ascii=False,
                                 default=str,
                             ),

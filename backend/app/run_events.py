@@ -34,6 +34,15 @@ def stream_key(run_id: uuid.UUID | str) -> str:
     return f"run:events:{run_id}"
 
 
+def finished_payload(status: str, summary: Any) -> dict[str, Any]:
+    """run.finished 的载荷:终态状态 + 汇总统计(与报告详情接口同一份 summary)。
+
+    终态事件有五个发射点(任务层正常/兜底 ×2、SSE 快照补发/空闲查库补发),
+    载荷形状只在这里定义一次,加字段不致各处漂移。
+    """
+    return {"status": status, "summary": summary}
+
+
 class StreamPublisher:
     """同步 Redis 客户端:引擎协程跑在独立线程的一次性事件循环里,
     与 RedisCancellationToken 同构;连接池线程安全,worker 主线程

@@ -81,11 +81,17 @@ export const useRunStore = defineStore('run', () => {
   }
 
   async function loadRun(runId: string, client: ApiClient = api): Promise<void> {
-    run.value = await fetchRun(runId, client)
+    // epoch 守卫:await 期间报告被切换/重置(reset/startStream 递增)的话,
+    // 旧请求的迟到响应不得写进新报告(loadRun/loadSteps 是全部远端写入口)
+    const epochAtStart = epoch
+    const data = await fetchRun(runId, client)
+    if (epochAtStart === epoch) run.value = data
   }
 
   async function loadSteps(runId: string, client: ApiClient = api): Promise<void> {
+    const epochAtStart = epoch
     const result = await fetchSteps(runId, client)
+    if (epochAtStart !== epoch) return
     steps.value = result.items
     stepsTruncated.value = result.truncated
   }
@@ -96,6 +102,7 @@ export const useRunStore = defineStore('run', () => {
 
   /** 报告详情是单例:进入新 run 前清掉旧报告,避免渲染残留/误取消。 */
   function reset(): void {
+    epoch += 1
     run.value = null
     steps.value = []
     stepsTruncated.value = false
@@ -105,6 +112,9 @@ export const useRunStore = defineStore('run', () => {
 
   let timer: ReturnType<typeof setInterval> | null = null
   let lastRunJson: string | null = null
+  // 报告代数:reset/startStream 各自递增;所有远端写回(loadRun/loadSteps)
+  // 在 await 恢复点校验,迟到的旧响应不能覆盖当前打开的报告
+  let epoch = 0
 
   async function pollOnce(runId: string, client: ApiClient): Promise<void> {
     // 单次轮询失败(网络抖动)不终止轮询:吞掉,下一跳自愈
@@ -175,33 +185,39 @@ export const useRunStore = defineStore('run', () => {
     progress.value = { completed: 0, total: payload.total_steps }
   }
 
-  /** step.finished 按 step_index 幂等 upsert:快照路径下可能重复投递,无害。
-   * 运行期合成行只有摘要字段(请求/响应明细终态重拉后由数据库行补齐)。 */
+  /** step.finished 按 step_index 幂等 upsert:快照路径下可能重复投递。
+   * 已有行合并而非整行替换 —— 服务端先取流尾再读数据库,快照里已含
+   * 明细的落库行可能随后被同一步的重放事件盖成摘要行;明细字段(request/
+   * response/断言/提取)以已有行为准,摘要字段(状态/耗时/断言数)以事件为准。
+   * 运行期新合成行只有摘要字段,请求/响应明细终态重拉后由数据库行补齐。 */
   function upsertStep(payload: {
     step_index: number
     step_name: string
+    step_type?: string
     status: string
     duration_ms: number | null
     assertion_total: number
     assertion_passed: number
   }): void {
+    const idx = steps.value.findIndex((s) => s.step_index === payload.step_index)
+    const prev = idx >= 0 ? steps.value[idx] : undefined
     const row: StepOut = {
       // 负数哨兵 id:行 key 是 step_index,id 只需不与真实行冲突
-      id: -(payload.step_index + 1),
+      id: prev?.id ?? -(payload.step_index + 1),
       step_index: payload.step_index,
       step_name: payload.step_name,
-      step_type: runningStep.value?.stepType ?? 'http',
+      // 跳过的步骤没有 step.started:类型以事件载荷为准(引擎随 finished 下发)
+      step_type: payload.step_type ?? runningStep.value?.stepType ?? prev?.step_type ?? 'http',
       status: payload.status,
       duration_ms: payload.duration_ms ?? 0,
-      request: null,
-      response: null,
-      extracted_variables: {},
-      assertions: [],
+      request: prev?.request ?? null,
+      response: prev?.response ?? null,
+      extracted_variables: prev?.extracted_variables ?? {},
+      assertions: prev?.assertions ?? [],
       assertion_total: payload.assertion_total,
       assertion_passed: payload.assertion_passed,
-      error_message: null,
+      error_message: prev?.error_message ?? null,
     }
-    const idx = steps.value.findIndex((s) => s.step_index === payload.step_index)
     if (idx >= 0) steps.value.splice(idx, 1, row)
     else steps.value.push(row)
     runningStep.value = null
@@ -218,9 +234,7 @@ export const useRunStore = defineStore('run', () => {
     steps.value = payload.steps
     stepsTruncated.value = payload.steps_truncated
     if (TERMINAL_STATUSES.has(payload.run.status)) {
-      runningStep.value = null
-      progress.value = null
-      stopStream()
+      stopStream() // 终态:快照即权威,停流(运行期状态随 stopStream 清除)且不重拉
     }
   }
 
@@ -232,10 +246,9 @@ export const useRunStore = defineStore('run', () => {
     if (run.value !== null) {
       run.value = { ...run.value, status: payload.status, summary: payload.summary }
     }
-    runningStep.value = null
-    progress.value = null
     stopStream()
-    // 重拉一次:用数据库权威行替换运行期依据事件合成的状态
+    // 重拉一次:用数据库权威行替换运行期依据事件合成的状态。
+    // epoch 已随 stopStream 递增,这里的在途重拉若遇切换/卸载,写回被守卫拦截
     void refresh(runId, client)
   }
 
@@ -329,9 +342,16 @@ export const useRunStore = defineStore('run', () => {
     for (const [name, handler] of streamHandlers) es.addEventListener(name, handler)
   }
 
-  /** 先摘回调再关闭:关闭后迟到的错误/事件不改变状态。 */
+  /** 先摘回调再关闭:关闭后迟到的错误/事件不改变状态。
+   * 递增 epoch:卸载/收尾后,handleRunFinished 触发的重拉等在途请求
+   * 的迟到响应不再写回状态(如终态后用户已切到别的报告)。
+   * 同时清运行期状态(progress/runningStep 只由事件流维护,流停了
+   * 就该消失 —— 降级轮询后残留会冻结成一个永远走不完的进度条)。 */
   function stopStream(): void {
+    epoch += 1
     streamRunId = null
+    progress.value = null
+    runningStep.value = null
     if (source === null) return
     const es = source
     source = null

@@ -78,8 +78,10 @@ class TestStepEventSequence:
         finished = dict(publisher.events[1][1])
         assert finished["step_index"] == 0
         assert finished["step_name"] == "步骤A"
+        assert finished["step_type"] == "http"  # 跳过的步骤没有 step.started,类型随 finished 走
         assert finished["status"] == "passed"
         assert finished["duration_ms"] >= 0
+        assert isinstance(finished["duration_ms"], int)  # 与 DbSink 落库取整同口径
         assert finished["assertion_total"] == 1  # status_code 断言
         assert finished["assertion_passed"] == 1
 
@@ -118,6 +120,7 @@ class TestSkippedStepEvents:
         skipped = dict(publisher.events[3][1])
         assert skipped["step_index"] == 1
         assert skipped["status"] == "skipped"
+        assert skipped["step_type"] == "http"  # 没发 step.started 的步骤类型也保真
 
     async def test_disabled_step_publishes_finished_without_started(self, sink) -> None:
         def handler(request):

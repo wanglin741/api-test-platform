@@ -1,0 +1,2317 @@
+diff --git a/backend/app/api/v1/cases.py b/backend/app/api/v1/cases.py
+index 3c8c007..dbeec6f 100644
+--- a/backend/app/api/v1/cases.py
++++ b/backend/app/api/v1/cases.py
+@@ -311,10 +311,10 @@ async def debug_step(
+     context = EngineContext(
+         sink=InMemorySink(),
+         # run_http_step 直接使用显式传入的 client,factory/sink 是 EngineContext 的必填契约位
+-        http_client_factory=lambda verify: httpx.AsyncClient(follow_redirects=True, verify=verify),
++        http_client_factory=lambda verify: httpx.AsyncClient(follow_redirects=True, verify=verify, trust_env=False),
+         body_max_bytes=settings.body_max_bytes,  # 与报告链路同一截断阈值
+     )
+-    async with httpx.AsyncClient(follow_redirects=True, verify=step.request.verify_ssl) as client:
++    async with httpx.AsyncClient(follow_redirects=True, verify=step.request.verify_ssl, trust_env=False) as client:
+         try:
+             result = await run_http_step(step, scope, context, client, dsl.config.timeout_ms)
+         except Exception as exc:
+diff --git a/backend/app/api/v1/runs.py b/backend/app/api/v1/runs.py
+index 5b380d2..6262aa9 100644
+--- a/backend/app/api/v1/runs.py
++++ b/backend/app/api/v1/runs.py
+@@ -1,19 +1,24 @@
+-"""执行触发 / 状态查询 / 取消。执行结果查询的完整报告端点在 T9。"""
++"""执行触发 / 状态查询 / 取消 / SSE 实时进度事件流。"""
+ 
+ import base64
+ import datetime
+ import json
+ import uuid
++from collections.abc import AsyncIterator
+ 
+-from fastapi import APIRouter, Depends, Query, Response
++import redis.asyncio as redis_async
++from fastapi import APIRouter, Depends, Query, Request, Response
++from fastapi.sse import EventSourceResponse, ServerSentEvent
+ from sqlalchemy import func, select, tuple_
+-from sqlalchemy.ext.asyncio import AsyncSession
++from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+ 
+-from app.api.deps import get_current_user, get_db
++from app.api.deps import SEED_USERNAME, get_current_user, get_db
+ from app.api.v1.common import get_project_or_404
+ from app.core.config import get_settings
+-from app.core.errors import ConflictError, ValidationFailedError, not_found
++from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
++from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
+ from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
++from app.run_events import stream_key
+ from app.schemas.runs import (
+     CancelAck,
+     RequestSnapshotOut,
+@@ -155,14 +160,13 @@ async def get_run(
+     return _run_out(run)
+ 
+ 
+-@router.get("/{run_id}/steps", response_model=StepList)
+-async def list_run_steps(
+-    run_id: uuid.UUID,
+-    session: AsyncSession = Depends(get_db),
+-    user: User = Depends(get_current_user),
+-) -> StepList:
+-    await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
+-    # 这张表禁止 SELECT *(数据模型 §9):显式列出明细需要的列,不抱走整行
++async def _load_step_items(
++    session: AsyncSession, run_id: uuid.UUID
++) -> tuple[list[StepOut], bool]:
++    """步骤明细加载:步骤明细接口与 run.snapshot 快照共用这一份实现。
++
++    这张表禁止 SELECT *(数据模型 §9):显式列出明细需要的列,不抱走整行。
++    """
+     columns = (
+         RunStepResult.id,
+         RunStepResult.step_index,
+@@ -234,6 +238,17 @@ async def list_run_steps(
+                 error_message=row.error_message,
+             )
+         )
++    return items, truncated
++
++
++@router.get("/{run_id}/steps", response_model=StepList)
++async def list_run_steps(
++    run_id: uuid.UUID,
++    session: AsyncSession = Depends(get_db),
++    user: User = Depends(get_current_user),
++) -> StepList:
++    await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
++    items, truncated = await _load_step_items(session, run_id)
+     return StepList(items=items, count=len(items), truncated=truncated)
+ 
+ 
+@@ -261,3 +276,178 @@ async def cancel_run(
+     run.status = "stopped" if run.status == "pending" else "stopping"
+     await session.flush()
+     return CancelAck(run_id=run.id, status=run.status)
++
++
++async def _ensure_run_stream_access(
++    run_id: uuid.UUID,
++    request: Request,
++    events: str | None = Query(default=None),
++) -> frozenset[str] | None:
++    """流开始前的认证 + 404 判定 + 过滤参数校验,短会话即用即释。
++
++    SSE 端点不能用 yield 依赖(get_db / get_current_user):其清理在流
++    结束后才跑,会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在
++    响应开始前运行,认证失败 / 404 / 非法过滤值都在流开始前返回 ——
++    生成器体里的异常无法变成 400。认证查询与 get_current_user 保持
++    同一缝(SEED_USERNAME),真实认证落地时同步换。返回过滤白名单。
++    """
++    allowed = _resolve_event_filter(events)
++    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
++    async with factory() as session:
++        result = await session.execute(select(User).where(User.username == SEED_USERNAME))
++        if result.scalar_one_or_none() is None:
++            raise AppError(
++                status_code=500,
++                code="seed_user_missing",
++                message="种子用户不存在,请确认迁移已执行",
++            )
++        await _get_run_or_404(session, run_id)
++    return allowed
++
++
++# 读循环参数提为模块常量:集成测试缩短空读间隔以覆盖「worker 被强杀、
++# 流里永无终态」的查库补偿路径,不必真等 60 秒
++READ_BLOCK_SECONDS = 10.0
++IDLE_DB_CHECK_SECONDS = 60.0
++
++
++def _parse_stream_id(raw: str) -> tuple[int, int] | None:
++    """「毫秒-序号」拆成数值对:游标比较必须按数值,按字符串比会错序。"""
++    ms, sep, seq = raw.partition("-")
++    if not sep or not ms.isdigit() or not seq.isdigit():
++        return None
++    return int(ms), int(seq)
++
++
++async def _stream_edge(client: redis_async.Redis, key: str, *, first: bool) -> str | None:
++    """流首(first)或流尾的消息 id;流不存在返回 None。"""
++    entries = await (client.xrange(key, count=1) if first else client.xrevrange(key, count=1))
++    return entries[0][0].decode() if entries else None
++
++
++def _resolve_event_filter(events: str | None) -> frozenset[str] | None:
++    """?events= 白名单过滤;非法取值立刻 400,不静默忽略。"""
++    if events is None:
++        return None
++    if events != "finished":
++        raise AppError(
++            message="events 仅支持 finished",
++            status_code=400,
++            code="invalid_events_filter",
++            details={"events": events},
++        )
++    return FINISHED_FILTER_EVENTS
++
++
++def _snapshot_payload(run: Run, steps: list[StepOut], truncated: bool) -> dict:
++    """run.snapshot 载荷:与报告详情接口同一份 schema 序列化(mode="json" 保日期可编码)。"""
++    return {
++        "run": _run_out(run).model_dump(mode="json"),
++        "steps": [s.model_dump(mode="json") for s in steps],
++        "steps_truncated": truncated,
++    }
++
++
++@router.get("/{run_id}/events", response_class=EventSourceResponse)
++async def stream_run_events(
++    run_id: uuid.UUID,
++    request: Request,
++    _allowed: frozenset[str] | None = Depends(_ensure_run_stream_access),
++) -> AsyncIterator[ServerSentEvent]:
++    """SSE 实时进度事件流(架构设计 §6 / API设计 §5)。
++
++    起点判定:无 Last-Event-ID(首次连接)、流为空、或游标早于流首 ⇒
++    快照路径 —— 先取流尾位置再读数据库(避免快照期间发布的事件被漏掉),
++    发 run.snapshot;执行已终态则补发 run.finished 并结束连接。游标仍
++    有效 ⇒ 重放路径,从游标之后续传。
++
++    补偿:连续空读约 60 秒查一次库(worker 被强杀、流里永无终态的场景),
++    已终态则补发 run.finished 并关闭,客户端不永久挂起。
++
++    生成器端点由 FastAPI 路由层编码为 SSE、设置 text/event-stream 与
++    Cache-Control / X-Accel-Buffering 两个头、自带 15 秒保活;每个连接
++    自建异步 Redis 客户端(绑定当前事件循环,不跨连接复用),断开时
++    finally 释放。
++    """
++    allowed = _allowed
++    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
++    client = redis_async.Redis.from_url(get_settings().redis_url)
++    try:
++        key = stream_key(run_id)
++
++        last_id = "0"
++        raw_cursor = request.headers.get("Last-Event-ID")
++        cursor = None
++        if raw_cursor and (parsed := _parse_stream_id(raw_cursor)) is not None:
++            head = await _stream_edge(client, key, first=True)
++            # 数值比较:游标 >= 流首才可信,早于流首说明该段已被裁剪,走快照
++            if head is not None and parsed >= _parse_stream_id(head):
++                cursor = raw_cursor
++
++        if cursor is None:
++            # 快照路径:流尾先于数据库读取取定,快照期间发布的事件都在其后,不漏
++            tail = await _stream_edge(client, key, first=False)
++            async with factory() as session:
++                run = await _get_run_or_404(session, run_id)
++                steps, truncated = await _load_step_items(session, run_id)
++            # run.snapshot 恒放行过滤:它是客户端重新同步的唯一入口
++            yield ServerSentEvent(
++                raw_data=json.dumps(
++                    _snapshot_payload(run, steps, truncated), ensure_ascii=False, default=str
++                ),
++                event=RUN_SNAPSHOT,
++            )
++            if run.status in RUN_TERMINAL_STATUSES:
++                # 终态在流里可能已被裁剪:用数据库事实补发,连接自然收尾
++                yield ServerSentEvent(
++                    raw_data=json.dumps(
++                        {"status": run.status, "summary": run.summary},
++                        ensure_ascii=False,
++                        default=str,
++                    ),
++                    event=RUN_FINISHED,
++                )
++                return
++            last_id = tail or "0"
++        else:
++            last_id = cursor
++
++        idle_seconds = 0.0
++        while True:
++            batches = await client.xread(
++                {key: last_id}, block=int(READ_BLOCK_SECONDS * 1000), count=100
++            )
++            if not batches:
++                idle_seconds += READ_BLOCK_SECONDS
++                if idle_seconds >= IDLE_DB_CHECK_SECONDS:
++                    idle_seconds = 0.0
++                    async with factory() as session:
++                        run = await session.get(Run, run_id)
++                    if run is not None and run.status in RUN_TERMINAL_STATUSES:
++                        yield ServerSentEvent(
++                            raw_data=json.dumps(
++                                {"status": run.status, "summary": run.summary},
++                                ensure_ascii=False,
++                                default=str,
++                            ),
++                            event=RUN_FINISHED,
++                        )
++                        return
++                continue
++            idle_seconds = 0.0
++
++            for _stream, messages in batches:
++                for message_id, fields in messages:
++                    last_id = message_id
++                    event = fields[b"event"].decode()
++                    # data 已是 JSON 字符串,用 raw_data 原样透传,避免二次编码
++                    if allowed is None or event in allowed:
++                        yield ServerSentEvent(
++                            raw_data=fields[b"data"].decode(),
++                            event=event,
++                            id=message_id.decode(),
++                        )
++                    if event == TERMINAL_EVENT:
++                        return  # 终态即关:浏览器侧不再挂着连接
++    finally:
++        await client.aclose()
+diff --git a/backend/app/core/config.py b/backend/app/core/config.py
+index 69c4f0b..69dfa0a 100644
+--- a/backend/app/core/config.py
++++ b/backend/app/core/config.py
+@@ -27,6 +27,11 @@ class Settings(BaseSettings):
+     # {{env.XXX}} 允许读取的进程环境变量前缀白名单(执行引擎 §3)
+     env_var_whitelist_prefixes: tuple[str, ...] = ("TEST_",)
+ 
++    # 实时进度事件流(架构设计 §6):流长度上限、运行期 TTL、进度限流间隔
++    run_stream_max_len: int = 10_000
++    run_stream_ttl_seconds: int = 86_400
++    run_progress_interval_ms: int = 1000
++
+ 
+ @lru_cache
+ def get_settings() -> Settings:
+diff --git a/backend/app/engine/runner.py b/backend/app/engine/runner.py
+index d3cd419..e605962 100644
+--- a/backend/app/engine/runner.py
++++ b/backend/app/engine/runner.py
+@@ -19,6 +19,7 @@ from app.engine.dsl import CaseDSL
+ from app.engine.results import RunStatus, RunSummary, StepResult
+ from app.engine.steps.http import run_http_step
+ from app.engine.variables import VariableScope
++from app.event_names import RUN_PROGRESS, STEP_FINISHED
+ 
+ 
+ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
+@@ -44,7 +45,6 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
+     timed_out = False
+     fail_fast_hit = False
+     try:
+-        context.publisher.publish("run.started", {"total_steps": len(dsl.steps)})
+         for index, step in enumerate(dsl.steps):
+             # ── 协作检查点(§10):步骤开始前 ─────────────────────────
+             if not cancelled and context.cancellation.cancelled():
+@@ -71,7 +71,7 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
+             else:
+                 result = await run_http_step(
+                     step, scope, context, _client_for(step.request.verify_ssl),
+-                    dsl.config.timeout_ms,
++                    dsl.config.timeout_ms, step_index=index,
+                 )
+                 result.step_index = index
+                 if (
+@@ -83,9 +83,22 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
+             results.append(result)
+             # 每步立即回调,不批量缓冲(§11)—— 长跑期间轮询可见部分结果
+             context.sink.on_step_finished(result)
++            # 载荷字段对齐落库列与步骤出参(step_index 而非 index);限流是
++            # 发布器的投递策略,引擎每步都发进度,单测保持确定性
++            passed = sum(1 for a in result.assertions if a.passed)
+             context.publisher.publish(
+-                "step.finished",
+-                {"step_id": step.id, "index": index, "status": result.status},
++                STEP_FINISHED,
++                {
++                    "step_index": index,
++                    "step_name": result.step_name,
++                    "status": result.status,
++                    "duration_ms": result.duration_ms,
++                    "assertion_total": len(result.assertions),
++                    "assertion_passed": passed,
++                },
++            )
++            context.publisher.publish(
++                RUN_PROGRESS, {"completed": index + 1, "total": len(dsl.steps)}
+             )
+     finally:
+         for client in clients.values():
+@@ -93,7 +106,8 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
+ 
+     duration_ms = (time.perf_counter() - start) * 1000
+     summary = _summarize(results, duration_ms, cancelled=cancelled, timed_out=timed_out)
+-    context.publisher.publish("run.finished", {"status": summary.status})
++    # 执行级事件(run.started/run.finished)由任务层发布:started_at 是数据库
++    # 时间、summary 含断言统计,引擎不掌握这些事实 —— 引擎只发逐步事件
+     return summary
+ 
+ 
+diff --git a/backend/app/engine/steps/http.py b/backend/app/engine/steps/http.py
+index 6c3ecff..e435017 100644
+--- a/backend/app/engine/steps/http.py
++++ b/backend/app/engine/steps/http.py
+@@ -22,6 +22,7 @@ from app.engine.dsl import RequestBody, StepSpec
+ from app.engine.extractors import ExtractionFailure, extract_value
+ from app.engine.results import RequestSnapshot, ResponseSnapshot, StepResult
+ from app.engine.variables import VariableResolutionError, VariableScope, stringify
++from app.event_names import STEP_STARTED
+ 
+ CANCEL_POLL_INTERVAL = 0.2  # 分段 sleep 的检查粒度(§10)
+ CONNECT_POOL_TIMEOUT = 5.0  # 连接 / 连接池超时上限(§9 超时层次)
+@@ -96,8 +97,9 @@ async def run_http_step(
+     context: EngineContext,
+     client: httpx.AsyncClient,
+     default_timeout_ms: int,
++    step_index: int = 0,
+ ) -> StepResult:
+-    result = StepResult(step_id=step.id, step_name=step.name, step_index=0, status="passed")
++    result = StepResult(step_id=step.id, step_name=step.name, step_index=step_index, status="passed")
+ 
+     if not step.enabled:
+         result.status = "skipped"
+@@ -132,6 +134,15 @@ async def run_http_step(
+             result.error_message = f"请求体不是合法 JSON: {exc}"
+             return result
+ 
++        # 步骤真正开始(构建成功、即将发请求)才发 step.started:跳过与
++        # 构建失败都没有「开始」;重试不重发。事件归属引擎(逐步事实),
++        # 载荷字段与落库列同源(step_index/step_name/step_type)
++        if attempt == 1:
++            context.publisher.publish(
++                STEP_STARTED,
++                {"step_index": step_index, "step_name": step.name, "step_type": step.type},
++            )
++
+         if prepared.content_type and not any(
+             k.lower() == "content-type" for k in headers
+         ):
+diff --git a/backend/app/event_names.py b/backend/app/event_names.py
+new file mode 100644
+index 0000000..addb45d
+--- /dev/null
++++ b/backend/app/event_names.py
+@@ -0,0 +1,24 @@
++"""执行进度事件名与过滤白名单(架构设计 §6 / API设计 §5)。
++
++纯常量模块,无任何依赖:引擎(不 import 框架/Redis)、任务层与 API 层
++三方共用同一套名字,不出现拼写漂移 —— 发事件的一方必须 import 这里的
++常量,不许写字面量。
++
++当前已上线:RUN_STARTED / RUN_FINISHED(任务层)、STEP_FINISHED(引擎)、
++TERMINAL_EVENT(SSE 端点收尾)。其余为已定契约、随后续变更启用,
++载荷形状以设计文档为准。
++"""
++
++RUN_STARTED = "run.started"
++STEP_STARTED = "step.started"
++STEP_FINISHED = "step.finished"
++RUN_PROGRESS = "run.progress"
++RUN_FINISHED = "run.finished"
++RUN_SNAPSHOT = "run.snapshot"
++
++# 执行终态事件:任务层专属 —— started_at 取数据库时间、summary 含断言统计,
++# 引擎不掌握这些事实(引擎只发逐步事件)
++TERMINAL_EVENT = RUN_FINISHED
++
++# ?events=finished 白名单:只订阅完成类事件,过程事件(开始/进度)被过滤
++FINISHED_FILTER_EVENTS = frozenset({STEP_FINISHED, RUN_FINISHED})
+diff --git a/backend/app/run_events.py b/backend/app/run_events.py
+new file mode 100644
+index 0000000..48f80ab
+--- /dev/null
++++ b/backend/app/run_events.py
+@@ -0,0 +1,93 @@
++"""执行进度事件的 Redis Streams 契约与发布器(架构设计 §6)。
++
++通道用 Streams 而非 Pub/Sub:Pub/Sub 至多一次投递,刷新页面、网络抖动、
++打开已跑一半的执行都会丢事件。流键与取消标志键(run:cancel:{id})同构,
++从执行 id 派生;Redis 里的一切都必须可重建 —— 任何时刻丢失都能从数据库
++重新推出当前状态,所以裁剪(XADD maxlen)与过期(TTL)策略可以激进,
++也兜得住「worker 被强杀、永不发终态」的孤儿流。
++
++发布失败一律吞掉并记 warning:事件通道只是进度展示,执行与报告落库
++不依赖它。
++
++放应用根层而非任务层/API 层:契约被两侧共用,放任一侧都会造成反向依赖;
++也不能放引擎层 —— 引擎不 import 框架/Redis。
++"""
++
++import json
++import logging
++import time
++import uuid
++from collections.abc import Callable
++from typing import Any
++
++import redis as redis_py
++
++from app.event_names import RUN_FINISHED, RUN_PROGRESS
++
++logger = logging.getLogger(__name__)
++
++# 终态后事件不再增长,流保留到刚打开的历史报告页还能补一次终态即可
++FINISHED_TTL_SECONDS = 3600
++
++
++def stream_key(run_id: uuid.UUID | str) -> str:
++    return f"run:events:{run_id}"
++
++
++class StreamPublisher:
++    """同步 Redis 客户端:引擎协程跑在独立线程的一次性事件循环里,
++    与 RedisCancellationToken 同构;连接池线程安全,worker 主线程
++    (执行级事件)与引擎线程(逐步事件)可共用同一个客户端。
++    """
++
++    def __init__(
++        self,
++        client: redis_py.Redis,
++        run_id: uuid.UUID | str,
++        *,
++        max_len: int = 10_000,
++        ttl_seconds: int = 86_400,
++        progress_interval_ms: int = 1000,
++        clock: Callable[[], float] = time.monotonic,
++    ) -> None:
++        self._client = client
++        self._key = stream_key(run_id)
++        self._max_len = max_len
++        self._ttl_seconds = ttl_seconds
++        self._progress_interval_ms = progress_interval_ms
++        self._clock = clock
++        # -inf:第一条进度必发;步骤串行 ⇒ 发布无并发,限流状态无需加锁
++        self._last_progress_at = float("-inf")
++
++    def publish(self, event: str, payload: dict[str, Any]) -> None:
++        if not self._progress_allowed(event, payload):
++            return
++        try:
++            self._client.xadd(
++                self._key,
++                {"event": event, "data": json.dumps(payload, ensure_ascii=False, default=str)},
++                maxlen=self._max_len,
++                approximate=True,
++            )
++            self._client.expire(
++                self._key,
++                FINISHED_TTL_SECONDS if event == RUN_FINISHED else self._ttl_seconds,
++            )
++        except Exception:
++            logger.warning(
++                "run %s 进度事件 %s 发布失败,前端将降级轮询", self._key, event, exc_info=True
++            )
++
++    def _progress_allowed(self, event: str, payload: dict[str, Any]) -> bool:
++        """run.progress 的限流是投递策略,不是引擎逻辑:引擎每步都发。
++        completed == total 恒放行 —— 客户端至少能看到终态进度。
++        """
++        if event != RUN_PROGRESS:
++            return True
++        if payload.get("completed") == payload.get("total"):
++            return True
++        now = self._clock()
++        if (now - self._last_progress_at) * 1000 < self._progress_interval_ms:
++            return False
++        self._last_progress_at = now
++        return True
+diff --git a/backend/app/tasks/engine_tasks.py b/backend/app/tasks/engine_tasks.py
+index b90e399..329a3b4 100644
+--- a/backend/app/tasks/engine_tasks.py
++++ b/backend/app/tasks/engine_tasks.py
+@@ -21,13 +21,15 @@ import redis as redis_py
+ from sqlalchemy import func, select
+ from sqlalchemy.orm import Session
+ 
+-from app.core.config import get_settings
++from app.core.config import Settings, get_settings
+ from app.db.session import make_sync_engine, make_sync_session_factory
+ from app.engine import EngineContext, execute as engine_execute
+ from app.engine.dsl import parse_dsl
+ from app.engine.results import StepResult, response_size
+ from app.engine.variables import compose_scope_variables
++from app.event_names import RUN_FINISHED, RUN_STARTED
+ from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
++from app.run_events import StreamPublisher
+ from app.tasks.celery_app import celery_app
+ 
+ logger = logging.getLogger(__name__)
+@@ -118,16 +120,39 @@ def _load_variables(session: Session, run: Run) -> tuple[dict, dict]:
+     )
+ 
+ 
++def _publish_run_finished(
++    run_id: str, status: str, summary: dict | None, settings: Settings
++) -> None:
++    """终态事件兜底:无常驻 publisher 的退出路径也补发一条,订阅端才知道收尾。
++
++    覆盖两类窗口 —— 任务重投时执行已终态(如 pending 期被取消)、崩溃发生
++    在 publisher 构造之前(DB 错误、版本缺失、DSL 解析失败)。重复终态
++    事件对客户端幂等无害。发布失败由 StreamPublisher 吞掉,不影响执行。
++    """
++    StreamPublisher(
++        redis_py.Redis.from_url(settings.redis_url),
++        run_id,
++        max_len=settings.run_stream_max_len,
++        ttl_seconds=settings.run_stream_ttl_seconds,
++    ).publish(RUN_FINISHED, {"status": status, "summary": summary})
++
++
+ @celery_app.task(name="engine.execute_run", bind=True)
+ def execute_run(self, run_id: str) -> None:
+     settings = get_settings()
+     worker_id = f"{socket.gethostname()}:{uuid.uuid4()}"
+     sync_engine = make_sync_engine(settings.database_url_sync)
++    # 进度事件发布器:在 Redis 客户端创建前崩溃则保持 None,兜底路径跳过发布
++    publisher: StreamPublisher | None = None
+     try:
+         with make_sync_session_factory(sync_engine)() as session:
+             run = session.get(Run, uuid.UUID(run_id))
+             # 幂等检查:acks_late + reject_on_worker_lost 下任务会被重投
+             if run is None or run.status in RUN_TERMINAL_STATUSES:
++                if run is not None:
++                    # 终态可能来自 pending 期取消(无 publisher 发过事件):
++                    # 补一条终态,订阅端才不会对着一个已结束的执行干等
++                    _publish_run_finished(run_id, run.status, run.summary, settings)
+                 return
+ 
+             run.status = "running"
+@@ -148,20 +173,37 @@ def execute_run(self, run_id: str) -> None:
+ 
+             redis_client = redis_py.Redis.from_url(settings.redis_url)
+             cancellation = RedisCancellationToken(redis_client, f"run:cancel:{run_id}")
++            publisher = StreamPublisher(
++                redis_client,
++                run_id,
++                max_len=settings.run_stream_max_len,
++                ttl_seconds=settings.run_stream_ttl_seconds,
++                progress_interval_ms=settings.run_progress_interval_ms,
++            )
+             sink = DbSink(
+                 session, run.id, worker_id,
+                 {i: step.type for i, step in enumerate(dsl.steps)},
+             )
+ 
+             def http_client_factory(verify: bool = True) -> httpx.AsyncClient:
+-                # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用
+-                return httpx.AsyncClient(follow_redirects=True, verify=verify)
++                # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用。
++                # trust_env=False:执行流量直达配置的 base_url,不读系统/环境代理
++                # (httpx 在 Windows 会读注册表系统代理,宿主机开着代理时
++                #  不可达目标会变成代理的 502 响应,连接失败语义被吞掉)。
++                return httpx.AsyncClient(follow_redirects=True, verify=verify, trust_env=False)
++
++            # run.started 由任务层发:started_at 已取回 DB 时间,步数来自锁定的版本
++            publisher.publish(
++                RUN_STARTED,
++                {"total_steps": len(dsl.steps), "started_at": run.started_at.isoformat()},
++            )
+ 
+             context = EngineContext(
+                 sink=sink,
+                 http_client_factory=http_client_factory,
+                 project_variables=project_vars,
+                 environment_variables=env_vars,
++                publisher=publisher,
+                 cancellation=cancellation,
+                 body_max_bytes=settings.body_max_bytes,
+             )
+@@ -193,6 +235,8 @@ def execute_run(self, run_id: str) -> None:
+                 "pass_rate": round(summary.passed / executed, 3) if executed else 0,
+             }
+             session.commit()
++            # run.finished 由任务层发(与 run.started 成对):漏发会让前端永久挂起
++            publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
+     except OwnershipLost:
+         return
+     except Exception:
+@@ -211,5 +255,11 @@ def execute_run(self, run_id: str) -> None:
+             "assertion_total": 0, "assertion_passed": 0,
+         }
+         session.commit()
++        # 崩溃兜底路径同样要发终态事件:订阅端才知道该收尾了。
++        # publisher 尚未构造的窗口(DB 错误 / 版本缺失 / DSL 解析失败)走兜底发布
++        if publisher is None:
++            _publish_run_finished(run_id, run.status, run.summary, settings)
++        else:
++            publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
+     finally:
+         sync_engine.dispose()
+diff --git a/backend/tests/engine/test_boundary.py b/backend/tests/engine/test_boundary.py
+index 41e49ec..f728e63 100644
+--- a/backend/tests/engine/test_boundary.py
++++ b/backend/tests/engine/test_boundary.py
+@@ -24,6 +24,9 @@ ALLOWED_THIRD_PARTY = {
+     "annotated_types",
+ }
+ 
++# 引擎唯一放行的应用层模块:事件名常量(纯常量、零依赖,spec 定为三方共用)
++ALLOWED_APP_MODULES = {"app.event_names"}
++
+ 
+ @pytest.fixture(scope="module")
+ def graph() -> Iterator[grimp.ImportGraph]:
+@@ -51,7 +54,8 @@ def test_engine_import_boundary(graph: grimp.ImportGraph) -> None:
+                 continue
+             # 引擎不得 import 应用的其他层(config 也经 context 注入)
+             if imported.startswith("app."):
+-                violations.append(f"{module} -> {imported}(应用层耦合)")
++                if imported not in ALLOWED_APP_MODULES:
++                    violations.append(f"{module} -> {imported}(应用层耦合)")
+                 continue
+             if root in ALLOWED_THIRD_PARTY:
+                 continue
+diff --git a/backend/tests/engine/test_events.py b/backend/tests/engine/test_events.py
+new file mode 100644
+index 0000000..d180dc7
+--- /dev/null
++++ b/backend/tests/engine/test_events.py
+@@ -0,0 +1,168 @@
++"""逐步事件契约:引擎是唯一知道逐步事实的地方,只发逐步事件。
++
++事件序列与载荷是引擎对订阅端的公开契约(spec #22 定案):
++- 单步成功恰为「步骤开始 → 步骤结束 → 进度」,无执行级事件
++- 跳过的步骤只发 step.finished 不发 step.started(跳过没有「开始」)
++- 载荷字段对齐既有数据库列与步骤出参(step_index 而非 index)
++- 进度事件的限流在发布器(投递策略),引擎每步都发、单测因此确定
++"""
++
++import json
++
++import pytest
++
++from app.engine.dsl import parse_dsl
++from app.engine.runner import execute
++from tests.engine.conftest import json_response, make_context
++
++from app.engine.defaults import InMemorySink
++
++
++class RecordingPublisher:
++    """记录型发布器:断言事件序列与载荷。"""
++
++    def __init__(self) -> None:
++        self.events: list[tuple[str, dict]] = []
++
++    def publish(self, event: str, payload: dict) -> None:
++        self.events.append((event, payload))
++
++
++def make_context_with_publisher(sink: InMemorySink, handler) -> tuple:
++    publisher = RecordingPublisher()
++    context = make_context(sink, handler, publisher=publisher)
++    return context, publisher
++
++
++def two_step_doc(**config) -> dict:
++    return {
++        "dsl_version": 1,
++        "config": config,
++        "steps": [
++            {"id": "a", "name": "步骤A", "type": "http",
++             "request": {"method": "GET", "url": "https://api.example.com/a"},
++             "assert": [{"type": "status_code", "operator": "eq", "expected": 200}]},
++            {"id": "b", "name": "步骤B", "type": "http",
++             "request": {"method": "GET", "url": "https://api.example.com/b"}},
++        ],
++    }
++
++
++def one_step_doc(**config) -> dict:
++    return {**two_step_doc(**config), "steps": two_step_doc(**config)["steps"][:1]}
++
++
++class TestStepEventSequence:
++    async def test_single_step_success_sequence_has_no_run_level_events(self, sink) -> None:
++        def handler(request):
++            return json_response(200)
++
++        context, publisher = make_context_with_publisher(sink, handler)
++        await execute(parse_dsl(one_step_doc()), context)
++
++        names = [e for e, _ in publisher.events]
++        # 恰为 开始 → 结束 → 进度,无执行级事件(执行级归任务层)
++        assert names == ["step.started", "step.finished", "run.progress"]
++
++    async def test_payloads_align_with_db_columns(self, sink) -> None:
++        def handler(request):
++            return json_response(200)
++
++        doc = two_step_doc()
++        context, publisher = make_context_with_publisher(sink, handler)
++        await execute(parse_dsl(doc), context)
++
++        started = dict(publisher.events[0][1])
++        assert started == {"step_index": 0, "step_name": "步骤A", "step_type": "http"}
++
++        finished = dict(publisher.events[1][1])
++        assert finished["step_index"] == 0
++        assert finished["step_name"] == "步骤A"
++        assert finished["status"] == "passed"
++        assert finished["duration_ms"] >= 0
++        assert finished["assertion_total"] == 1  # status_code 断言
++        assert finished["assertion_passed"] == 1
++
++        progress = dict(publisher.events[2][1])
++        assert progress == {"completed": 1, "total": 2}
++
++    async def test_payloads_json_serializable(self, sink) -> None:
++        """契约守卫:每个载荷必须能过 JSON 序列化,否则发布器写流即失败。"""
++
++        def handler(request):
++            return json_response(200, {"ok": True})
++
++        doc = two_step_doc()
++        context, publisher = make_context_with_publisher(sink, handler)
++        await execute(parse_dsl(doc), context)
++
++        for event, payload in publisher.events:
++            json.dumps(payload, ensure_ascii=False)
++
++
++class TestSkippedStepEvents:
++    async def test_fail_fast_skips_publish_finished_without_started(self, sink) -> None:
++        def handler(request):
++            return json_response(500, {"msg": "boom"})
++
++        doc = two_step_doc(fail_fast=True)
++        context, publisher = make_context_with_publisher(sink, handler)
++        await execute(parse_dsl(doc), context)
++
++        names = [e for e, _ in publisher.events]
++        # 步骤A:开始+结束;步骤B(fail_fast 跳过):只发结束;每步都有进度
++        assert names == [
++            "step.started", "step.finished", "run.progress",
++            "step.finished", "run.progress",
++        ]
++        skipped = dict(publisher.events[3][1])
++        assert skipped["step_index"] == 1
++        assert skipped["status"] == "skipped"
++
++    async def test_disabled_step_publishes_finished_without_started(self, sink) -> None:
++        def handler(request):
++            return json_response(200)
++
++        doc = two_step_doc()
++        doc["steps"][0]["enabled"] = False
++        context, publisher = make_context_with_publisher(sink, handler)
++        await execute(parse_dsl(doc), context)
++
++        names = [e for e, _ in publisher.events]
++        assert names == [
++            "step.finished", "run.progress",
++            "step.started", "step.finished", "run.progress",
++        ]
++
++    async def test_progress_reaches_total_on_cancellation(self, sink) -> None:
++        """取消后其余步骤标记 skipped,进度仍推进到总数(客户端至少看到终态进度)。"""
++
++        class AlwaysCancelled:
++            def cancelled(self) -> bool:
++                return True
++
++        def handler(request):
++            return json_response(200)
++
++        doc = two_step_doc()
++        context, publisher = make_context_with_publisher(sink, handler)
++        context.cancellation = AlwaysCancelled()
++        await execute(parse_dsl(doc), context)
++
++        progress = [p for e, p in publisher.events if e == "run.progress"]
++        assert progress[-1] == {"completed": 2, "total": 2}
++
++
++@pytest.mark.parametrize("step_index", [0, 1])
++async def test_step_type_matches_dsl(sink, step_index) -> None:
++    """step_type 来自 DSL 的 type 字段(与落库的 step_type 列同源)。"""
++
++    def handler(request):
++        return json_response(200)
++
++    doc = two_step_doc()
++    context, publisher = make_context_with_publisher(sink, handler)
++    await execute(parse_dsl(doc), context)
++
++    started = dict(publisher.events[step_index * 3][1])
++    assert started["step_type"] == "http"
+diff --git a/backend/tests/integration/conftest.py b/backend/tests/integration/conftest.py
+index 7859a1c..e6e8cc4 100644
+--- a/backend/tests/integration/conftest.py
++++ b/backend/tests/integration/conftest.py
+@@ -14,6 +14,8 @@ os.environ.setdefault(
+     "APITEST_DATABASE_URL_SYNC",
+     f"postgresql+psycopg://apitest:apitest@localhost:5432/{_TEST_DB}",
+ )
++# 事件流测试用独立 db index,与开发库(db 0)隔离;每个用例前 flushdb
++os.environ.setdefault("APITEST_REDIS_URL", "redis://localhost:6379/15")
+ 
+ from pathlib import Path
+ 
+@@ -63,6 +65,10 @@ def clean_tables(database: None) -> None:
+             "TRUNCATE run_step_result, run, test_case_version, test_case, folder, "
+             "variable, environment, project RESTART IDENTITY CASCADE"
+         )
++    # 事件流的 Redis db 一并清空,用例之间互不可见
++    import redis as redis_py
++
++    redis_py.Redis.from_url(os.environ["APITEST_REDIS_URL"]).flushdb()
+ 
+ 
+ @pytest.fixture(scope="module")
+diff --git a/backend/tests/integration/test_run_events_stream.py b/backend/tests/integration/test_run_events_stream.py
+new file mode 100644
+index 0000000..b628e2e
+--- /dev/null
++++ b/backend/tests/integration/test_run_events_stream.py
+@@ -0,0 +1,316 @@
++"""SSE 实时进度事件流(架构设计 §6 / API设计 §5):真实 PG + 真实 Redis + eager Celery。
++
++覆盖 #23 骨干 + #25 快照与续传:事件序列与载荷、快照路径、Last-Event-ID
++续传、补偿兜底、过滤参数、响应头、404。快照/续传的游标比较用合成游标,
++不造上万条真实数据。
++"""
++
++import json
++import uuid
++from datetime import datetime
++
++import pytest
++
++
++async def _setup_and_run(client, url: str, dsl: dict | None = None) -> str:
++    """建项目 + 环境 + 用例并触发执行(eager 同步跑完),返回 run_id。"""
++    from tests.integration.test_cases import _dsl
++
++    project = (await client.post("/api/v1/projects", json={"name": "事件流项目"})).json()
++    env = (
++        await client.post(
++            f"/api/v1/projects/{project['id']}/environments",
++            json={"name": "local", "base_url": "unused"},
++        )
++    ).json()
++    case = (
++        await client.post(
++            f"/api/v1/projects/{project['id']}/cases",
++            json={"name": "单步用例", "dsl": dsl or _dsl(url=url)},
++        )
++    ).json()
++    resp = await client.post(
++        f"/api/v1/projects/{project['id']}/runs",
++        json={"case_id": case["id"], "environment_id": env["id"]},
++    )
++    assert resp.status_code == 202, resp.text
++    return resp.json()["run_id"]
++
++
++async def _read_sse(client, run_id: str, **kwargs) -> tuple[list[dict], dict[str, str]]:
++    """消费事件流直到连接自然关闭;返回 (事件列表, 响应头)。用超时包住防挂死。"""
++    import asyncio
++
++    events: list[dict] = []
++    headers: dict[str, str] = {}
++    current: dict = {}
++    async with client.stream("GET", f"/api/v1/runs/{run_id}/events", **kwargs) as resp:
++        assert resp.status_code == 200
++        headers = dict(resp.headers)
++        async for line in resp.aiter_lines():
++            if line.startswith(":"):  # keep-alive 注释
++                continue
++            if not line:  # 空行 = 事件边界
++                if current:
++                    events.append(current)
++                    current = {}
++                continue
++            field, _, value = line.partition(": ")
++            if field == "event":
++                current["event"] = value
++            elif field == "data":
++                current["data"] = value
++            elif field == "id":
++                current["id"] = value
++        if current:  # 流结束时未跟空行的最后一条
++            events.append(current)
++    return events, headers
++
++
++def _ts(value: str) -> datetime:
++    return datetime.fromisoformat(value.replace("Z", "+00:00"))
++
++
++def _stream_head_id(run_id: str) -> str:
++    """直接从 Redis 取流首消息 id:首连走快照路径,流内事件不经 SSE 全量投出。"""
++    import redis as redis_py
++
++    from app.core.config import get_settings
++
++    client = redis_py.Redis.from_url(get_settings().redis_url)
++    entries = client.xrange(f"run:events:{run_id}", count=1)
++    assert entries, "流为空,无法取流首 id"
++    return entries[0][0].decode()
++
++
++async def test_first_connect_gets_snapshot_then_terminal_and_closes(
++    client, local_server
++):
++    """首次连接(无 Last-Event-ID)走快照路径:内容与数据库一致,终态补发后自然关闭。"""
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    events, headers = await _read_sse(client, run_id)
++
++    # 三个响应头;text/event-stream 由 EventSourceResponse 自带
++    assert headers["content-type"].startswith("text/event-stream")
++    assert headers["cache-control"] == "no-cache"
++    assert headers["x-accel-buffering"] == "no"
++
++    names = [e["event"] for e in events]
++    assert names == ["run.snapshot", "run.finished"]  # 终态执行:快照 + 终态即收尾
++
++    snapshot = json.loads(events[0]["data"])
++    db_run = (await client.get(f"/api/v1/runs/{run_id}")).json()
++    assert snapshot["run"]["status"] == db_run["status"] == "success"
++    assert snapshot["run"]["summary"] == db_run["summary"]
++    assert _ts(snapshot["run"]["started_at"]) == _ts(db_run["started_at"])
++    assert snapshot["steps_truncated"] is False
++    assert [s["step_index"] for s in snapshot["steps"]] == [0]  # 与数据库步骤一致
++
++    finished = json.loads(events[-1]["data"])
++    assert finished["status"] == "success"
++    assert finished["summary"] == db_run["summary"]
++
++    # 收到终态后连接自然关闭(消费循环能结束本身就是断言)
++
++
++async def test_replay_from_last_event_id_continues_after_cursor(
++    client, local_server
++):
++    """带 Last-Event-ID 重连:从游标之后续传,首事件不是快照,事件 id 均大于游标。"""
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++    cursor = _stream_head_id(run_id)  # 流首(run.started)作为重连游标
++
++    events, _ = await _read_sse(client, run_id, headers={"Last-Event-ID": cursor})
++
++    names = [e["event"] for e in events]
++    assert "run.snapshot" not in names  # 游标仍有效:重放,不同步快照
++    assert names == [
++        "step.started", "step.finished", "run.progress", "run.finished",
++    ]  # run.started 及之前的(含自身)不重发
++    ids = [int(e["id"].split("-")[0]) for e in events if e.get("id")]
++    cursor_ms = int(cursor.split("-")[0])
++    assert all(i > cursor_ms for i in ids)
++
++
++async def test_cursor_earlier_than_stream_head_falls_back_to_snapshot(
++    client, local_server
++):
++    """游标早于流首(合成小游标,模拟该段已被裁剪):走快照,不重放。"""
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    events, _ = await _read_sse(client, run_id, headers={"Last-Event-ID": "1-0"})
++
++    names = [e["event"] for e in events]
++    assert names == ["run.snapshot", "run.finished"]
++
++
++async def test_deleted_stream_falls_back_to_snapshot(client, local_server):
++    """流已被删除(过期/flush)而客户端仍带着游标:补偿走快照,不挂起。"""
++    import redis as redis_py
++
++    from app.core.config import get_settings
++
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++    client_py = redis_py.Redis.from_url(get_settings().redis_url)
++    client_py.delete(f"run:events:{run_id}")
++
++    events, _ = await _read_sse(client, run_id, headers={"Last-Event-ID": "1-0"})
++
++    names = [e["event"] for e in events]
++    assert names == ["run.snapshot", "run.finished"]
++
++
++async def test_idle_db_check_publishes_terminal_when_stream_has_none(
++    client, local_server, monkeypatch
++):
++    """worker 被强杀、流里永无终态:连续空读到阈值后查库补发终态并关闭。"""
++    import app.api.v1.runs as runs_module
++
++    # 缩短空读间隔与阈值:~2 次空读(每次 0.05s)即触发查库,不必等 60 秒
++    monkeypatch.setattr(runs_module, "READ_BLOCK_SECONDS", 0.05)
++    monkeypatch.setattr(runs_module, "IDLE_DB_CHECK_SECONDS", 0.1)
++
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    # 带「指向未来」的游标(流在、游标有效):重放路径空转,
++    # 流里再无新事件 —— 模拟 worker 强杀后终态永不落流
++    events, _ = await _read_sse(
++        client, run_id, headers={"Last-Event-ID": "9999999999999999-0"}
++    )
++
++    names = [e["event"] for e in events]
++    assert names == ["run.finished"]
++    assert json.loads(events[0]["data"])["status"] == "success"
++
++
++async def test_stream_unknown_run_404(client):
++    resp = await client.get(f"/api/v1/runs/{uuid.uuid4()}/events")
++    assert resp.status_code == 404
++    assert resp.json()["error"]["code"] == "run_not_found"
++
++
++async def test_events_finished_filter_passes_only_finished(client, local_server):
++    """?events=finished:只放行 step.finished/run.finished(快照恒放行)。"""
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    events, _ = await _read_sse(client, run_id, params={"events": "finished"})
++
++    names = [e["event"] for e in events]
++    assert names == ["run.snapshot", "run.finished"]  # step.started/progress 被滤掉
++
++
++async def test_events_filter_invalid_value_400(client, local_server):
++    """非法过滤值立刻 400,不静默忽略。"""
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    resp = await client.get(f"/api/v1/runs/{run_id}/events", params={"events": "bogus"})
++
++    assert resp.status_code == 400
++    assert resp.json()["error"]["code"] == "invalid_events_filter"
++
++
++async def test_crash_fallback_still_publishes_run_finished(
++    client, local_server, monkeypatch
++):
++    """引擎意外崩溃的兜底路径也落 error 终态:首连快照即见,不永久挂起。"""
++    from app.tasks import engine_tasks
++
++    async def boom(dsl, context):
++        raise RuntimeError("引擎炸了")
++
++    monkeypatch.setattr(engine_tasks, "engine_execute", boom)
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    events, _ = await _read_sse(client, run_id)
++
++    names = [e["event"] for e in events]
++    assert names == ["run.snapshot", "run.finished"]
++    assert json.loads(events[0]["data"])["run"]["status"] == "error"
++    assert json.loads(events[-1]["data"])["status"] == "error"
++
++
++async def test_crash_before_publisher_still_lands_error_status(
++    client, local_server, monkeypatch
++):
++    """publisher 构造之前的崩溃(DB 错误 / 版本缺失 / DSL 解析失败)也落 error 终态。"""
++    from app.tasks import engine_tasks
++
++    def boom(dsl):
++        raise RuntimeError("DSL 炸了")
++
++    monkeypatch.setattr(engine_tasks, "parse_dsl", boom)
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++
++    events, _ = await _read_sse(client, run_id)
++
++    names = [e["event"] for e in events]
++    assert names == ["run.snapshot", "run.finished"]
++    assert json.loads(events[-1]["data"])["status"] == "error"
++
++
++async def test_redelivery_of_terminal_run_publishes_run_finished(client, local_server):
++    """任务重投时执行已终态(如 pending 期被取消):早退前补发终态事件。
++
++    直接查流而非重连 SSE:端点见到首条终态即关闭,第二条终态只在流里。
++    """
++    import redis as redis_py
++
++    from app.core.config import get_settings
++    from app.tasks.engine_tasks import execute_run
++
++    run_id = await _setup_and_run(client, f"{local_server}/json")
++    events_before, _ = await _read_sse(client, run_id)
++    assert sum(1 for e in events_before if e["event"] == "run.finished") == 1
++
++    execute_run.run(run_id)  # 重投:命中幂等早退,但补发一条终态
++
++    client_py = redis_py.Redis.from_url(get_settings().redis_url)
++    stream = client_py.xrange(f"run:events:{run_id}")
++    finished = [fields for _, fields in stream if fields[b"event"] == b"run.finished"]
++    assert len(finished) == 2  # 原始 + 重投补发(重复终态对客户端幂等无害)
++    assert json.loads(finished[-1][b"data"])["status"] == "success"
++
++
++async def test_stream_step_events_match_execution(client, local_server):
++    """逐步事件与实际执行对应(重放路径验证序列):跳过的步骤只有 step.finished。"""
++
++    def two_step_dsl(url: str) -> dict:
++        return {
++            "dsl_version": 1,
++            "config": {},
++            "steps": [
++                {"id": "s1", "name": "第一步", "type": "http",
++                 "request": {"method": "GET", "url": url}},
++                # 引用未定义变量 → 跳过(没有「开始」)
++                {"id": "s2", "name": "第二步", "type": "http",
++                 "request": {"method": "GET", "url": url + "/{{missing_var}}"}},
++            ],
++        }
++
++    run_id = await _setup_and_run(client, f"{local_server}/json", dsl=two_step_dsl(f"{local_server}/json"))
++
++    # 直接取流首 id 作游标,经重放路径验证逐步序列
++    cursor = _stream_head_id(run_id)
++
++    events, _ = await _read_sse(client, run_id, headers={"Last-Event-ID": cursor})
++
++    names = [e["event"] for e in events]
++    # 第一步:开始→结束→进度;第二步(跳过):结束→进度;末尾 run.finished
++    assert names == [
++        "step.started", "step.finished", "run.progress",
++        "step.finished", "run.progress",
++        "run.finished",
++    ]
++
++    finished_first = json.loads(events[1]["data"])
++    assert finished_first["step_index"] == 0
++    assert finished_first["step_name"] == "第一步"
++    assert finished_first["status"] == "passed"
++
++    skipped = json.loads(events[3]["data"])
++    assert skipped["step_index"] == 1
++    assert skipped["status"] == "skipped"
++
++    progress_events = [json.loads(e["data"]) for e in events if e["event"] == "run.progress"]
++    assert progress_events == [{"completed": 1, "total": 2}, {"completed": 2, "total": 2}]
+diff --git a/backend/tests/test_run_events.py b/backend/tests/test_run_events.py
+new file mode 100644
+index 0000000..56097dc
+--- /dev/null
++++ b/backend/tests/test_run_events.py
+@@ -0,0 +1,157 @@
++"""Redis Streams 发布器:流契约与失败兜底(架构设计 §6)。
++
++用桩 Redis 客户端,不连真实基础设施 —— 只断言「发布器写进 Redis 的
++字段与 TTL 策略」这一外部行为。
++"""
++
++import json
++import logging
++
++import pytest
++
++from app.event_names import RUN_FINISHED, RUN_PROGRESS, RUN_STARTED, STEP_FINISHED
++from app.run_events import FINISHED_TTL_SECONDS, StreamPublisher, stream_key
++
++
++class FakeRedis:
++    """记录 xadd/expire 调用的桩;可注入异常模拟 Redis 故障。"""
++
++    def __init__(self) -> None:
++        self.added: list[tuple[str, dict, int | None]] = []
++        self.expired: list[tuple[str, int]] = []
++        self.error: Exception | None = None
++
++    def xadd(self, key, fields, maxlen=None, approximate=False):
++        if self.error is not None:
++            raise self.error
++        self.added.append((key, dict(fields), maxlen))
++
++    def expire(self, key, seconds):
++        if self.error is not None:
++            raise self.error
++        self.expired.append((key, seconds))
++
++
++def make_publisher(client: FakeRedis) -> StreamPublisher:
++    return StreamPublisher(
++        client, "0f9d1c3e-0000-0000-0000-000000000001", max_len=10_000, ttl_seconds=86_400
++    )
++
++
++def test_stream_key_derived_from_run_id():
++    assert stream_key("abc") == "run:events:abc"
++
++
++def test_publish_writes_event_and_json_data_fields():
++    client = FakeRedis()
++    make_publisher(client).publish(RUN_STARTED, {"total_steps": 3, "started_at": "2026-01-01T00:00:00"})
++
++    key, fields, maxlen = client.added[0]
++    assert key == "run:events:0f9d1c3e-0000-0000-0000-000000000001"
++    assert fields["event"] == RUN_STARTED
++    assert json.loads(fields["data"]) == {
++        "total_steps": 3,
++        "started_at": "2026-01-01T00:00:00",
++    }
++    assert maxlen == 10_000  # 长度上限封住流大小
++
++
++def test_publish_renews_ttl_and_shortens_after_terminal_event():
++    client = FakeRedis()
++    publisher = make_publisher(client)
++
++    publisher.publish(RUN_STARTED, {})
++    assert client.expired == [("run:events:0f9d1c3e-0000-0000-0000-000000000001", 86_400)]
++
++    publisher.publish(RUN_FINISHED, {"status": "success", "summary": {}})
++    assert client.expired[-1][1] == FINISHED_TTL_SECONDS  # 终态后降到短 TTL
++
++
++def test_publish_swallows_redis_failure(caplog):
++    """Redis 故障不能让执行失败:吞掉并记 warning,前端自然降级轮询。"""
++    client = FakeRedis()
++    client.error = ConnectionError("redis down")
++    with caplog.at_level(logging.WARNING):
++        make_publisher(client).publish(RUN_STARTED, {"total_steps": 1})
++
++    assert client.added == []
++    assert any("发布失败" in r.message for r in caplog.records)
++
++
++@pytest.mark.parametrize("payload", [{"n": 1}, {"nested": {"a": ["b"]}}, {"dt": "2026-01-01T00:00:00"}])
++def test_payload_always_json_serializable(payload):
++    client = FakeRedis()
++    make_publisher(client).publish("any.event", payload)
++    json.loads(client.added[0][1]["data"])
++
++
++class FakeClock:
++    """假时钟:测试里手动推进,验证限流窗口。"""
++
++    def __init__(self) -> None:
++        self.now = 1000.0
++
++    def __call__(self) -> float:
++        return self.now
++
++    def advance(self, seconds: float) -> None:
++        self.now += seconds
++
++
++class TestProgressThrottle:
++    """run.progress 的 1 秒限流是投递策略,归发布器;completed == total 恒放行。"""
++
++    def make_throttled(self, interval_ms: int = 1000):
++        client = FakeRedis()
++        clock = FakeClock()
++        publisher = StreamPublisher(
++            client, "run-1", progress_interval_ms=interval_ms, clock=clock
++        )
++        return publisher, client, clock
++
++    def test_progress_within_interval_is_suppressed(self):
++        publisher, client, clock = self.make_throttled()
++        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
++        clock.advance(0.5)
++        publisher.publish(RUN_PROGRESS, {"completed": 2, "total": 10})
++
++        assert len(client.added) == 1  # 0.5s 内的第二条被限流吞掉
++
++    def test_progress_after_interval_passes(self):
++        publisher, client, clock = self.make_throttled()
++        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
++        clock.advance(1.0)
++        publisher.publish(RUN_PROGRESS, {"completed": 2, "total": 10})
++
++        assert len(client.added) == 2
++
++    def test_terminal_progress_always_passes(self):
++        publisher, client, clock = self.make_throttled()
++        publisher.publish(RUN_PROGRESS, {"completed": 9, "total": 10})
++        clock.advance(0.0)
++        publisher.publish(RUN_PROGRESS, {"completed": 10, "total": 10})
++
++        assert len(client.added) == 2  # completed == total 恒放行
++
++    def test_first_progress_always_passes(self):
++        publisher, client, _ = self.make_throttled()
++        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
++
++        assert len(client.added) == 1
++
++    def test_throttle_only_applies_to_progress_events(self):
++        """其他事件不受限流:限流是 run.progress 的投递策略,不是发布器的全局行为。"""
++        publisher, client, clock = self.make_throttled()
++        publisher.publish(STEP_FINISHED, {"step_index": 0})
++        clock.advance(0.0)
++        publisher.publish(STEP_FINISHED, {"step_index": 1})
++
++        assert len(client.added) == 2
++
++    def test_interval_configurable(self):
++        publisher, client, clock = self.make_throttled(interval_ms=100)
++        publisher.publish(RUN_PROGRESS, {"completed": 1, "total": 10})
++        clock.advance(0.2)
++        publisher.publish(RUN_PROGRESS, {"completed": 2, "total": 10})
++
++        assert len(client.added) == 2
+diff --git "a/docs/design/API\350\256\276\350\256\241.md" "b/docs/design/API\350\256\276\350\256\241.md"
+index 1d61639..d5bbccb 100644
+--- "a/docs/design/API\350\256\276\350\256\241.md"
++++ "b/docs/design/API\350\256\276\350\256\241.md"
+@@ -319,23 +319,30 @@ data: {"status": "success", "summary": {...}}
+ 
+ **事件类型**:
+ 
+-| `event` | 触发时机 | 载荷要点 |
++| `event` | 触发时机 | 载荷 |
+ |---|---|---|
+-| `run.started` | 执行开始 | 步骤总数 |
+-| `step.started` | 步骤开始 | 序号、名称、类型 |
+-| `step.finished` | 步骤结束 | 状态、耗时、断言统计 |
+-| `run.progress` | 进度变化(**限流 1/s**) | 已完成 / 总数 |
+-| `run.finished` | 进入终态 | 终态、汇总 |
++| `run.started` | 执行开始(任务层发) | `{total_steps, started_at}` |
++| `step.started` | 步骤构建成功、真正发请求前(引擎发) | `{step_index, step_name, step_type}` |
++| `step.finished` | 步骤结束(引擎发) | `{step_index, step_name, status, duration_ms, assertion_total, assertion_passed}` |
++| `run.progress` | 每步之后(**限流 1/s,限流在发布器**) | `{completed, total}` |
++| `run.finished` | 进入终态(任务层发) | `{status, summary}` |
++| `run.snapshot` | 首连/游标失效时(SSE 端点发) | `{run, steps, steps_truncated}` |
+ 
+-`step.started` 让 UI 能显示「正在执行第 N 步」而不是只在完成后跳数字。代价是事件量翻倍 —— 若成为负担,可通过查询参数 `?events=finished` 只订阅完成事件。
++`step.started` 让 UI 能显示「正在执行第 N 步」而不是只在完成后跳数字。被跳过的步骤只发 `step.finished` 不发 `step.started`(跳过没有「开始」)。
+ 
+-### 断线续传
++### 过滤
++
++可选查询参数 `?events=finished`:白名单只放行 `step.finished` 与 `run.finished`(`run.snapshot` 恒放行 —— 它是重新同步的唯一入口)。**非法取值返回 400**(`code: invalid_events_filter`),不静默忽略。
++
++### 断线续传与快照
+ 
+ SSE 的 `id` 字段是 **Redis Stream 的消息 ID**。浏览器自动重连时会带 `Last-Event-ID` 头,服务端从该 ID 之后继续读,不丢事件。
+ 
+ 这是选 Redis Streams 而非 Pub/Sub 的直接原因。Pub/Sub 是至多一次投递,用户刷新页面时正在执行的那次就再也接不上了。
+ 
+-**若 `Last-Event-ID` 早于 Stream 的保留范围**(Stream 用 `MAXLEN ~ 10000` 裁剪),服务端发送一个 `run.snapshot` 事件,携带从 PG 读出的当前完整状态,然后继续推送后续事件。客户端只需要处理这一种「重新同步」情况。
++**起点判定**:无 `Last-Event-ID`(首次连接)、流为空、或游标早于 Stream 保留范围(按「毫秒-序号」**数值**比较,流用 `MAXLEN ~ 10000` 裁剪)⇒ 服务端发送一个 `run.snapshot` 事件,携带从 PG 读出的当前完整状态 `{run, steps, steps_truncated}`(与报告详情接口同一份 schema),然后继续推送后续事件。游标仍有效 ⇒ 从游标之后重放,不发快照。客户端只需要处理这一种「重新同步」情况;快照先取流尾位置再读数据库,快照期间发布的事件不会被漏掉。
++
++**执行已终态的执行**:快照 + `run.finished` 后连接自然关闭,不留下挂起的连接。**连续空读约 60 秒**(worker 被强杀、流里永无终态)时服务端查一次库,已终态则补发 `run.finished` 并关闭。
+ 
+ ### 保活
+ 
+@@ -343,7 +350,7 @@ SSE 的 `id` 字段是 **Redis Stream 的消息 ID**。浏览器自动重连时
+ 
+ ### 降级
+ 
+-前端在 SSE 连接失败 3 次后,退化为每 2 秒轮询 `GET /runs/{rid}`。该端点本就存在,不需要为降级额外实现任何东西。
++前端在 SSE 连接失败 3 次后(连接成功即清零计数,避免「连上又断」误判),退化为每 2 秒轮询 `GET /runs/{rid}`。该端点本就存在,不需要为降级额外实现任何东西。
+ 
+ ## 6. Mock Server 端点
+ 
+diff --git "a/docs/design/\345\211\215\347\253\257\350\256\276\350\256\241.md" "b/docs/design/\345\211\215\347\253\257\350\256\276\350\256\241.md"
+index 98788fb..c578c72 100644
+--- "a/docs/design/\345\211\215\347\253\257\350\256\276\350\256\241.md"
++++ "b/docs/design/\345\211\215\347\253\257\350\256\276\350\256\241.md"
+@@ -13,7 +13,7 @@
+ | 触发执行 | 选环境触发(202)→ 跳转报告详情;运行中可取消 |
+ | 执行报告 | 报告列表(回看历史)+ 详情(统计卡、可展开步骤明细、请求/响应快照、断言明细) |
+ 
+-**不做**:登录页(后端免认证,种子用户)、Playwright e2e、SSE(轮询)、项目管理独立页(只做选择器 + 新建弹窗,删改走 Swagger)。
++**不做**:登录页(后端免认证,种子用户)、Playwright e2e、项目管理独立页(只做选择器 + 新建弹窗,删改走 Swagger)。报告详情以 SSE 事件流为主、轮询降级(§6)。
+ 
+ > 注:结构化 DSL 表单最初列为「不做」(先让用户写原生 JSON 反哺 DSL 设计);JSON 编辑器攒到用户反馈后已于 2026-10 补上(见 §6.1)。
+ 
+@@ -60,14 +60,14 @@ npm run gen:api   # 后端在跑时执行:拉 openapi.json → openapi-typescrip
+ 
+ - `projectStore`:项目列表、当前项目 id。
+ - `environmentStore` / `variableStore` / `caseStore` / `folderStore`:各自资源的列表与 CRUD 状态。
+-- `runStore`:触发、轮询(run + steps 两个轮询合并:steps 变更时才重取)、取消。
++- `runStore`:触发、报告订阅(SSE 事件流为主:订阅 `GET /runs/{rid}/events`,收 `run.snapshot` 整体替换现状、`step.started` 置「正在执行第 N 步」、`step.finished` 按 `step_index` 幂等 upsert、`run.progress` 置进度、`run.finished` 停流并重拉权威行;连续 3 次连接失败或无 EventSource 等不可用场景降级为轮询 —— run + steps 两个轮询合并:steps 变更时才重取)、取消。
+ 
+ API client 通过 store 的工厂函数注入,测试时换 mock 实现 —— 与后端「EngineContext 注入」同构,这是 store 缝可测的前提。
+ 
+ ## 6. 执行与报告动线
+ 
+ 1. 用例编辑页「执行」→ 弹窗选环境(必选,默认上次用的)→ `POST /projects/{pid}/runs`(202)→ 路由跳 `/runs/{run_id}`。
+-2. 报告详情每 **2s** 轮询 `GET /runs/{rid}` + `GET /runs/{rid}/steps`;run 到终态(`RUN_TERMINAL_STATUSES`)停轮。轮询逻辑在 `runStore`,组件不感知。
++2. 报告详情订阅 SSE 事件流 `GET /runs/{rid}/events`(事件源工厂可注入,便于测试);收到 `run.snapshot` 整体替换 run 与步骤(终态快照停流且不重拉 —— 快照即权威);收到 `run.finished` 停流并重拉一次权威行。事件流不可用(无 EventSource、连续 3 次连接失败,open 清零计数)时降级为每 **2s** 轮询 `GET /runs/{rid}` + `GET /runs/{rid}/steps`,run 到终态(`RUN_TERMINAL_STATUSES`)停轮。订阅与降级逻辑都在 `runStore`,组件不感知;停流先摘回调再关闭,迟到的错误/事件不改变状态、不触发降级。步骤行 key 用 `step_index`(运行期事件合成行与终态数据库行切换时 key 稳定,展开态不丢)。
+ 3. 运行中顶部状态条:状态、已耗时、「取消」按钮(→ `POST /runs/{rid}/cancel`)。
+ 4. 报告详情(issue #21 改版):顶部**统计卡行**(总步骤/通过/失败/出错/跳过/总耗时,等宽数字;用例/版本/环境/触发方式元信息收进卡下的一行)+ 下方**可展开步骤列表** —— 每行状态/名称/耗时/断言通过数,点击展开看请求/响应快照(含截断标记)、断言逐条明细与提取变量;失败/出错行左侧色条突出。展开明细渲染与调试面板共用 `StepSnapshot` 组件(同一信息架构,报告固定上下分栏、调试可切分栏)。运行中 summary 未落库时统计卡显示 `—` 而非 0。
+ 
+@@ -108,7 +108,7 @@ API client 通过 store 的工厂函数注入,测试时换 mock 实现 —— 
+ 
+ | 缝 | 测什么 | 手段 |
+ |---|---|---|
+-| **缝 1:Pinia store** | 注入 mock API client,验证状态迁移:列表加载/错误、**轮询启停**(终态停轮、取消后停轮)、CRUD 后列表刷新 | Vitest + mock client,毫秒级 |
++| **缝 1:Pinia store** | 注入 mock API client,验证状态迁移:列表加载/错误、**事件流订阅与轮询启停**(终态停流/停轮、取消后停轮)、CRUD 后列表刷新 | Vitest + mock client + 假事件源,毫秒级 |
+ | **缝 2:关键组件挂载** | 报告统计卡数值与失败突出态、步骤展开明细(请求/响应/断言/提取/截断标记)、DSL 编辑器校验错误回显、编排工作台双向同步(URL 等改动进 dsl/随 PATCH 提交、非法 JSON 阻止切视图、脏点显隐、调试先保存再调端点)、步骤详情面板(Body 类型切换/提取断言行增删)、调试结果分栏与断言渲染、共享快照组件(`StepSnapshot` 的请求/响应/断言/提取渲染)、KV 行内编辑与增删行、`is_secret` 打码切换、目录树(层级渲染/未分类虚拟节点/搜索过滤/选中过滤右表/新建重命名删除与拖拽参数换算) | @vue/test-utils |
+ 
+ 不测:Element Plus 自身行为、纯展示模板。不引入 Playwright(页面稳定后评估)。
+diff --git "a/docs/design/\346\211\247\350\241\214\345\274\225\346\223\216.md" "b/docs/design/\346\211\247\350\241\214\345\274\225\346\223\216.md"
+index 548268e..dac659a 100644
+--- "a/docs/design/\346\211\247\350\241\214\345\274\225\346\223\216.md"
++++ "b/docs/design/\346\211\247\350\241\214\345\274\225\346\223\216.md"
+@@ -17,12 +17,14 @@ engine/ 禁止 import: fastapi, celery, sqlalchemy, app.models, app.services
+ 
+ | 协议 | 职责 | 生产实现 | 测试实现 |
+ |---|---|---|---|
+-| `ResultSink` | 步骤结果落库 | `DbResultSink` | `InMemorySink` |
+-| `ProgressPublisher` | 进度事件推送 | `RedisStreamPublisher` | `NullPublisher` |
++| `ResultSink` | 步骤结果落库 | `DbSink`(任务层) | `InMemorySink` |
++| `ProgressPublisher` | 逐步事件推送(step.* / run.progress) | `StreamPublisher`(Redis Streams) | `NullPublisher` / 记录型发布器 |
+ | `CancellationToken` | 查询是否已请求取消 | `RedisCancellationToken` | `NeverCancelled` / `ImmediateCancel` |
+ 
+ 用 `typing.Protocol` 定义,不引入抽象基类。CI 里用 `import-linter` 的 `forbidden` 契约守住边界。
+ 
++生产端的 HTTP 客户端由任务层(`http_client_factory`)注入,一律 **`trust_env=False`**:执行流量直达配置的 base_url,不读环境变量代理与 Windows 注册表系统代理。否则宿主机开着代理时,不可达目标会被代理接管成 502 响应,「连接拒绝」这类 `error` 语义被吞掉,执行结果随开发者本机的代理状态漂移。
++
+ ## 2. 用例 DSL
+ 
+ 可执行用例是一份 JSON 文档,对应 `test_case_version.dsl`。
+@@ -399,7 +401,7 @@ environment.max_concurrency ≤ httpx.Limits.max_connections
+ 
+ 理由:用户要实时看到进度。批量缓冲(比如攒 10 步写一次)会让报告出现「卡住不动然后突然跳 10 步」的观感。单次执行上千次 INSERT 对 PG 不是压力,瓶颈从来不在 INSERT。
+ 
+-进度事件另外推 Redis Stream,**限流至 1 秒一次**。
++进度事件另外推 Redis Stream。**事件归属(语义定案,已实现)**:引擎只发**逐步事件** —— `step.started`(构建成功、真正发请求前;跳过与构建失败没有「开始」,重试不重发)、`step.finished`、`run.progress`(每步都发,限流在发布器);**执行级事件归任务层** —— `run.started` / `run.finished` 由 `engine_tasks` 发布(started_at 是数据库时间、summary 含断言统计,引擎不掌握这些事实)。run.progress 的 **1 秒限流是发布器的投递策略**,不是引擎逻辑(`completed == total` 恒放行),引擎单测因此每步都能断言、保持确定性。
+ 
+ ### 大响应体转对象存储
+ 
+diff --git "a/docs/design/\346\236\266\346\236\204\350\256\276\350\256\241.md" "b/docs/design/\346\236\266\346\236\204\350\256\276\350\256\241.md"
+index 8b72665..dca6897 100644
+--- "a/docs/design/\346\236\266\346\236\204\350\256\276\350\256\241.md"
++++ "b/docs/design/\346\236\266\346\236\204\350\256\276\350\256\241.md"
+@@ -162,23 +162,30 @@ celery_app.conf.update(
+ 
+ ## 6. 实时进度推送
+ 
++> **已实现**(issue #22 系列):事件名常量模块、Stream 发布器、SSE 端点、前端订阅均已落地,见 `app/event_names.py`、`app/run_events.py`、`app/api/v1/runs.py`。
++
+ **通道**:Redis Streams(`XADD` / `XREAD BLOCK`),而非 Pub/Sub。
+ 
+-**理由**:Pub/Sub 是至多一次投递,客户端在消息发布时没订阅就永远看不到。用户刷新页面、网络抖动、或打开一个已跑了 30 秒的执行,都会丢事件。Streams 支持按 ID 重放,配合 SSE 的 `Last-Event-ID` 头可以无缝续传。Stream 用 `MAXLEN ~ 10000` 裁剪,单次执行的完整历史另有 PG 兜底。
++**理由**:Pub/Sub 是至多一次投递,客户端在消息发布时没订阅就永远看不到。用户刷新页面、网络抖动、或打开一个已跑了 30 秒的执行,都会丢事件。Streams 支持按 ID 重放,配合 SSE 的 `Last-Event-ID` 头可以无缝续传。单次执行的完整历史另有 PG 兜底。
++
++**事件归属**(语义定案):**引擎只发逐步事件**(step.started / step.finished / run.progress,引擎是唯一知道逐步事实的地方);**执行级事件归任务层**(run.started / run.finished —— started_at 是数据库时间、summary 含断言统计,只有任务层掌握这些事实)。`run.snapshot` 由 SSE 端点在读数据库后发出,是客户端重新同步的唯一入口。
+ 
+ **事件类型**:
+ 
+-| 事件 | 载荷 |
+-|---|---|
+-| `run.started` | 步骤总数、开始时间 |
+-| `step.started` | 步骤序号、名称、类型 |
+-| `step.finished` | 状态、耗时、断言通过数 |
+-| `run.progress` | 已完成/总数(**限流至 1/s**) |
+-| `run.finished` | 终态、汇总统计 |
++| 事件 | 发射方 | 载荷 |
++|---|---|---|
++| `run.started` | 任务层 | `{total_steps, started_at}`(started_at 取数据库 `now()`) |
++| `step.started` | 引擎 | `{step_index, step_name, step_type}`(构建成功、真正发请求前;跳过与构建失败没有「开始」,重试不重发) |
++| `step.finished` | 引擎 | `{step_index, step_name, status, duration_ms, assertion_total, assertion_passed}`(字段对齐落库列) |
++| `run.progress` | 引擎 | `{completed, total}`(**限流至 1/s,限流在发布器**) |
++| `run.finished` | 任务层 | `{status, summary}`(summary 与报告详情接口同一份) |
++| `run.snapshot` | SSE 端点 | `{run, steps, steps_truncated}`(从数据库读出的当前完整状态) |
++
++**流定案**:流键 `run:events:{run_id}`(与取消键 `run:cancel:{id}` 同构);`XADD MAXLEN ~ 10000` 裁剪大小;每次发布续期 24h,终态后降到 1h —— 封住「worker 被强杀、永不发终态」的孤儿流生命周期。Redis 里的一切可从数据库重建,所以裁剪与过期可以激进。**发布失败一律吞掉并记 warning**:事件通道只是进度展示,执行与报告落库不依赖它。run.progress 的 1 秒限流是发布器的**投递策略**而非引擎逻辑(`completed == total` 恒放行),引擎单测因此保持确定性。
+ 
+-**端点**:`GET /api/v1/runs/{id}/events`,SSE。FastAPI 0.135.0 起原生支持(`from fastapi.sse import EventSourceResponse`),不再需要 `sse-starlette`。
++**端点**:`GET /api/v1/runs/{id}/events`,SSE。FastAPI 0.135.0 起原生支持(`from fastapi.sse import EventSourceResponse`),不再需要 `sse-starlette`。起点判定:无 `Last-Event-ID`、流为空、或游标(按「毫秒-序号」数值比较)早于流首 ⇒ 快照路径(先取流尾再读数据库);游标仍有效 ⇒ 从游标后重放。连续空读约 60 秒查一次库,已终态而流里没有终态事件则补发并关闭。端点不持有数据库连接:认证与 404 在流开始前用短会话完成(yield 依赖会把连接占住整个 SSE 生命周期)。
+ 
+-**写入策略**:`run_step_result` 每步一行写 PG(这是事实来源,必须落);进度快照**合并后**每秒推一次 Stream。绝不把 Celery 的 `update_state` 当日志用 —— 它的实现就是每次调用全量写一遍结果后端,单次执行上千个请求就是上千次后端写。
++**写入策略**:`run_step_result` 每步一行写 PG(这是事实来源,必须落);进度经 Stream 推送,限流在发布器。绝不把 Celery 的 `update_state` 当日志用 —— 它的实现就是每次调用全量写一遍结果后端,单次执行上千个请求就是上千次后端写。
+ 
+ **降级**:SSE 连不上时前端退化为 2 秒轮询 `GET /runs/{id}`。这个接口本来就存在,不需要额外实现。
+ 
+diff --git "a/docs/guide/\346\234\257\350\257\255\350\241\250.md" "b/docs/guide/\346\234\257\350\257\255\350\241\250.md"
+index 2701631..b7d246e 100644
+--- "a/docs/guide/\346\234\257\350\257\255\350\241\250.md"
++++ "b/docs/guide/\346\234\257\350\257\255\350\241\250.md"
+@@ -66,6 +66,14 @@ _Avoid_: 运行、任务
+ 一次执行的完整记录:汇总统计与逐步骤的请求/响应/断言/提取明细。
+ _Avoid_: 结果、日志
+ 
++**事件流(Event Stream)**:
++报告详情页的实时进度通道:SSE 端点 `GET /runs/{rid}/events`,以 Redis Streams 承载;事件名与载荷由 `app/event_names.py` 唯一定义。
++_Avoid_: 推送、WebSocket、消息队列
++
++**快照(Snapshot)**:
++事件流的 `run.snapshot` 事件:服务端从数据库读出的当前完整状态(run + 步骤 + 截断标记),在首次连接、断线重连游标失效、或打开已跑一半的执行时发出,是客户端唯一的「重新同步」入口。
++_Avoid_: 全量刷新、重放
++
+ ### 前端
+ 
+ **编排视图**:
+diff --git "a/docs/ops/\345\274\200\345\217\221\347\216\257\345\242\203.md" "b/docs/ops/\345\274\200\345\217\221\347\216\257\345\242\203.md"
+index 8e17cd1..8194964 100644
+--- "a/docs/ops/\345\274\200\345\217\221\347\216\257\345\242\203.md"
++++ "b/docs/ops/\345\274\200\345\217\221\347\216\257\345\242\203.md"
+@@ -23,7 +23,7 @@ uv run pytest            # 测试应全绿
+ 
+ | 类别 | 选型 | 版本要求 | 依据 |
+ |---|---|---|---|
+-| Web 框架 | FastAPI + uvicorn[standard] | ≥ 0.135 | 设计文档要求 SSE 可用 0.135+ 原生支持(首版暂不实现 SSE) |
++| Web 框架 | FastAPI + uvicorn[standard] | ≥ 0.135 | 设计文档要求 SSE 可用 0.135+ 原生支持(已实现,`fastapi.sse`) |
+ | HTTP 客户端 | httpx | — | 引擎 D2:自研异步引擎的请求层,`MockTransport` 也是引擎测试的关键缝 |
+ | ORM | SQLAlchemy 2.x `[asyncio]` | — | D6:API 用 async engine;worker 用同步 Session,两个驱动都要装 |
+ | 数据库驱动 | asyncpg(API)+ psycopg[binary](worker) | — | D6:asyncpg 不能跨事件循环复用,worker 全程同步,故双驱动 |
+diff --git a/frontend/src/stores/run.spec.ts b/frontend/src/stores/run.spec.ts
+index fa0ffde..09e98f6 100644
+--- a/frontend/src/stores/run.spec.ts
++++ b/frontend/src/stores/run.spec.ts
+@@ -250,3 +250,366 @@ describe('runStore', () => {
+     expect(store.lastEnvId(2)).toBeNull()
+   })
+ })
++
++/** 可编程的假事件源:记录 URL 与监听器,测试里手动派发事件。 */
++class FakeEventSource {
++  static instances: FakeEventSource[] = []
++  readonly url: string
++  closed = false
++  listeners = new Map<string, EventListener>()
++
++  constructor(url: string) {
++    this.url = url
++    FakeEventSource.instances.push(this)
++  }
++
++  addEventListener(name: string, fn: EventListener): void {
++    this.listeners.set(name, fn)
++  }
++
++  removeEventListener(name: string): void {
++    this.listeners.delete(name)
++  }
++
++  close(): void {
++    this.closed = true
++  }
++
++  listenerNames(): string[] {
++    return [...this.listeners.keys()]
++  }
++
++  emit(name: string, data?: unknown): void {
++    this.listeners.get(name)?.(
++      new MessageEvent(name, { data: data === undefined ? undefined : JSON.stringify(data) }),
++    )
++  }
++}
++
++describe('runStore.startStream', () => {
++  beforeEach(() => {
++    vi.useFakeTimers()
++    localStorage.clear()
++    FakeEventSource.instances = []
++  })
++  afterEach(() => {
++    vi.useRealTimers()
++  })
++
++  function streamClient() {
++    return mockClient({
++      GET: vi.fn(async (path: unknown) =>
++        okResponse(
++          String(path).includes('/steps') ? { items: [], count: 0, truncated: false } : RUN_RUNNING,
++        ),
++      ),
++    })
++  }
++
++  it('startStream:先 refresh 打底再开流,注册 run.started/run.finished 监听', async () => {
++    setActivePinia(createPinia())
++    const client = streamClient()
++    const store = useRunStore()
++
++    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
++
++    expect(store.run?.status).toBe('running')
++    expect(store.streaming).toBe(true)
++    expect(store.polling).toBe(false)
++    const source = FakeEventSource.instances[0]!
++    expect(source.url).toBe('/api/v1/runs/r-1/events')
++    expect([...source.listeners.keys()]).toEqual(
++      expect.arrayContaining(['run.started', 'run.finished']),
++    )
++  })
++
++  it('run.started:补状态与开始时间', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++
++    FakeEventSource.instances[0]!.emit('run.started', {
++      total_steps: 3,
++      started_at: '2026-01-01T00:00:05Z',
++    })
++
++    expect(store.run?.status).toBe('running')
++    expect(store.run?.started_at).toBe('2026-01-01T00:00:05Z')
++  })
++
++  it('run.finished:停流并重拉权威行(数据库行替换事件合成行)', async () => {
++    setActivePinia(createPinia())
++    // 第 1 次 run GET 是打底(running),终态重拉返回数据库权威行
++    const AUTHORITATIVE = {
++      ...RUN_RUNNING,
++      status: 'success',
++      summary: { total: 2, passed: 2 },
++    }
++    let runFetches = 0
++    const client = mockClient({
++      GET: vi.fn(async (path: unknown) =>
++        okResponse(
++          String(path).includes('/steps')
++            ? { items: [], count: 0, truncated: false }
++            : ++runFetches === 1
++              ? RUN_RUNNING
++              : AUTHORITATIVE,
++        ),
++      ),
++    })
++    const store = useRunStore()
++    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
++
++    FakeEventSource.instances[0]!.emit('run.finished', {
++      status: 'success',
++      summary: { total: 2, passed: 2 },
++    })
++    await vi.advanceTimersByTimeAsync(0)
++
++    expect(store.run?.status).toBe('success')
++    expect(store.run?.summary).toEqual(AUTHORITATIVE.summary)
++    expect(store.streaming).toBe(false)
++    expect(FakeEventSource.instances[0]!.closed).toBe(true)
++    expect(runFetches).toBe(2) // 打底 1 次 + 终态重拉 1 次
++  })
++
++  it('执行期事件:运行中步骤、幂等 upsert、进度推进', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++    const source = FakeEventSource.instances[0]!
++
++    source.emit('run.started', { total_steps: 3, started_at: '2026-01-01T00:00:05Z' })
++    expect(store.progress).toEqual({ completed: 0, total: 3 })
++
++    source.emit('step.started', { step_index: 0, step_name: '登录', step_type: 'http' })
++    expect(store.runningStep).toEqual({ stepIndex: 0, stepName: '登录', stepType: 'http' })
++
++    // 运行期合成行:摘要字段(明细终态重拉后由数据库行补齐)
++    source.emit('step.finished', {
++      step_index: 0,
++      step_name: '登录',
++      status: 'passed',
++      duration_ms: 12,
++      assertion_total: 2,
++      assertion_passed: 2,
++    })
++    expect(store.steps).toHaveLength(1)
++    expect(store.steps[0]).toMatchObject({
++      step_index: 0,
++      status: 'passed',
++      assertion_total: 2,
++    })
++    expect(store.runningStep).toBeNull() // 步骤结束,不再有运行中的步骤
++
++    // 重复投递同一步骤:幂等 upsert,不出现重复行
++    source.emit('step.finished', {
++      step_index: 0,
++      step_name: '登录',
++      status: 'passed',
++      duration_ms: 13,
++      assertion_total: 2,
++      assertion_passed: 2,
++    })
++    expect(store.steps).toHaveLength(1)
++    expect(store.steps[0]?.duration_ms).toBe(13)
++
++    source.emit('run.progress', { completed: 1, total: 3 })
++    expect(store.progress).toEqual({ completed: 1, total: 3 })
++  })
++
++  it('reset:清空运行期进度与运行中步骤', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++    const source = FakeEventSource.instances[0]!
++    source.emit('run.started', { total_steps: 2, started_at: null })
++    source.emit('step.started', { step_index: 0, step_name: 's', step_type: 'http' })
++
++    store.reset()
++
++    expect(store.progress).toBeNull()
++    expect(store.runningStep).toBeNull()
++  })
++
++  it('run.snapshot:整体替换 run 与步骤;终态快照停流且不重拉', async () => {
++    setActivePinia(createPinia())
++    let runFetches = 0
++    const client = mockClient({
++      GET: vi.fn(async () => {
++        runFetches += 1
++        return okResponse(RUN_RUNNING)
++      }),
++    })
++    const store = useRunStore()
++    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
++
++    // 打开已跑一半的执行:首连收到数据库权威现状
++    const SNAPSHOT_RUN = { ...RUN_RUNNING, status: 'running' }
++    FakeEventSource.instances[0]!.emit('run.snapshot', {
++      run: SNAPSHOT_RUN,
++      steps: [
++        {
++          id: 11,
++          step_index: 0,
++          step_name: '已完成步骤',
++          step_type: 'http',
++          status: 'passed',
++          duration_ms: 9,
++          extracted_variables: {},
++          assertions: [],
++          assertion_total: 1,
++          assertion_passed: 1,
++        },
++      ],
++      steps_truncated: true,
++    })
++
++    expect(store.run).toEqual(SNAPSHOT_RUN)
++    expect(store.steps).toHaveLength(1)
++    expect(store.stepsTruncated).toBe(true)
++    expect(store.streaming).toBe(true) // 运行中:继续收实时事件
++    const fetchesAfterSnapshot = runFetches // 打底 run+steps 共 2 次
++
++    // 终态快照:快照即权威,停流且不重拉
++    FakeEventSource.instances[0]!.emit('run.snapshot', {
++      run: { ...RUN_RUNNING, status: 'success', summary: { total: 1, passed: 1 } },
++      steps: [],
++      steps_truncated: false,
++    })
++
++    expect(store.run?.status).toBe('success')
++    expect(store.streaming).toBe(false)
++    expect(FakeEventSource.instances[0]!.closed).toBe(true)
++    expect(runFetches).toBe(fetchesAfterSnapshot) // 无终态重拉
++  })
++
++  it('打开已终态的执行:不开流也不轮询', async () => {
++    setActivePinia(createPinia())
++    const client = mockClient({
++      GET: vi.fn(async (path: unknown) =>
++        okResponse(
++          String(path).includes('/steps')
++            ? { items: [], count: 0, truncated: false }
++            : { ...RUN_RUNNING, status: 'success' },
++        ),
++      ),
++    })
++    const store = useRunStore()
++
++    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
++
++    expect(FakeEventSource.instances).toHaveLength(0)
++    expect(store.polling).toBe(false)
++    expect(store.streaming).toBe(false)
++  })
++
++  it('无原生 EventSource(默认工厂在 jsdom):直接降级轮询', async () => {
++    setActivePinia(createPinia())
++    const client = streamClient()
++    const store = useRunStore()
++
++    await store.startStream('r-1', client)
++
++    expect(store.polling).toBe(true)
++    expect(store.streaming).toBe(false)
++    expect(FakeEventSource.instances).toHaveLength(0)
++  })
++
++  it('stopStream:先摘回调再关闭,迟到事件不再改变状态', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++    const source = FakeEventSource.instances[0]!
++
++    store.stopStream()
++
++    expect(source.closed).toBe(true)
++    expect(store.streaming).toBe(false)
++    source.emit('run.finished', { status: 'success', summary: { total: 1 } })
++    expect(store.run?.status).toBe('running') // 迟到事件被忽略
++  })
++
++  it('连续 3 次连接失败:停流并降级轮询', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++    const source = FakeEventSource.instances[0]!
++
++    source.emit('error')
++    source.emit('error')
++    expect(store.streaming).toBe(true)
++    expect(store.polling).toBe(false)
++
++    source.emit('error')
++
++    expect(source.closed).toBe(true)
++    expect(store.streaming).toBe(false)
++    expect(store.polling).toBe(true) // 降级轮询,页面功能不中断
++  })
++
++  it('open 清零失败计数:两次失败 → 成功 → 两次失败不降级', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++    const source = FakeEventSource.instances[0]!
++
++    source.emit('error')
++    source.emit('error')
++    source.emit('open') // 连上:清零
++    source.emit('error')
++    source.emit('error')
++
++    expect(store.streaming).toBe(true)
++    expect(store.polling).toBe(false)
++  })
++
++  it('stopStream 后迟到的 error 不触发降级', async () => {
++    setActivePinia(createPinia())
++    const store = useRunStore()
++    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
++    const source = FakeEventSource.instances[0]!
++
++    store.stopStream()
++    source.emit('error')
++    source.emit('error')
++    source.emit('error')
++
++    expect(store.polling).toBe(false) // 卸载后的迟到错误不触发降级
++  })
++
++  it('首刷 GET 失败:降级轮询自愈,不搁浅在空页', async () => {
++    setActivePinia(createPinia())
++    const client = mockClient({
++      GET: vi.fn(async () => {
++        throw new Error('boom')
++      }),
++    })
++    const store = useRunStore()
++
++    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
++
++    expect(store.polling).toBe(true)
++    expect(store.streaming).toBe(false)
++  })
++
++  it('await 打底期间订阅被替换(切换报告):旧订阅不开流、不写状态', async () => {
++    setActivePinia(createPinia())
++    let resolveA!: (value: unknown) => void
++    const pending = new Promise((resolve) => {
++      resolveA = resolve
++    })
++    // 两个并发 GET 共享同一个挂起 promise:模拟打底尚未返回
++    const client = mockClient({ GET: vi.fn(() => pending) })
++    const store = useRunStore()
++
++    const pendingA = store.startStream('r-a', client, (url) => new FakeEventSource(url))
++    store.stopStream() // 视图卸载/切换,B 的 startStream 也会先 stop
++    resolveA(okResponse(RUN_RUNNING))
++    await pendingA
++
++    expect(FakeEventSource.instances).toHaveLength(0)
++    expect(store.streaming).toBe(false)
++    expect(store.run).toBeNull() // 旧 run 的数据不落地
++  })
++})
+diff --git a/frontend/src/stores/run.ts b/frontend/src/stores/run.ts
+index 451ca6a..bbc302b 100644
+--- a/frontend/src/stores/run.ts
++++ b/frontend/src/stores/run.ts
+@@ -66,19 +66,28 @@ export const useRunStore = defineStore('run', () => {
+     return data?.run_id ?? null
+   }
+ 
+-  async function loadRun(runId: string, client: ApiClient = api): Promise<void> {
++  async function fetchRun(runId: string, client: ApiClient = api) {
+     const { data } = await client.GET('/api/v1/runs/{run_id}', {
+       params: { path: { run_id: runId } },
+     })
+-    run.value = data ?? null
++    return data ?? null
+   }
+ 
+-  async function loadSteps(runId: string, client: ApiClient = api): Promise<void> {
++  async function fetchSteps(runId: string, client: ApiClient = api) {
+     const { data } = await client.GET('/api/v1/runs/{run_id}/steps', {
+       params: { path: { run_id: runId } },
+     })
+-    steps.value = data?.items ?? []
+-    stepsTruncated.value = data?.truncated ?? false
++    return { items: data?.items ?? [], truncated: data?.truncated ?? false }
++  }
++
++  async function loadRun(runId: string, client: ApiClient = api): Promise<void> {
++    run.value = await fetchRun(runId, client)
++  }
++
++  async function loadSteps(runId: string, client: ApiClient = api): Promise<void> {
++    const result = await fetchSteps(runId, client)
++    steps.value = result.items
++    stepsTruncated.value = result.truncated
+   }
+ 
+   async function refresh(runId: string, client: ApiClient = api): Promise<void> {
+@@ -90,20 +99,27 @@ export const useRunStore = defineStore('run', () => {
+     run.value = null
+     steps.value = []
+     stepsTruncated.value = false
++    progress.value = null
++    runningStep.value = null
+   }
+ 
+   let timer: ReturnType<typeof setInterval> | null = null
+   let lastRunJson: string | null = null
+ 
+   async function pollOnce(runId: string, client: ApiClient): Promise<void> {
+-    await loadRun(runId, client)
+-    // run 未变化时跳过 steps 重取(前端设计 §5:合并轮询,变更才重取)
+-    const current = run.value === null ? null : JSON.stringify(run.value)
+-    if (current !== lastRunJson) {
+-      lastRunJson = current
+-      await loadSteps(runId, client)
++    // 单次轮询失败(网络抖动)不终止轮询:吞掉,下一跳自愈
++    try {
++      await loadRun(runId, client)
++      // run 未变化时跳过 steps 重取(前端设计 §5:合并轮询,变更才重取)
++      const current = run.value === null ? null : JSON.stringify(run.value)
++      if (current !== lastRunJson) {
++        lastRunJson = current
++        await loadSteps(runId, client)
++      }
++      if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) stopPolling()
++    } catch {
++      return
+     }
+-    if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) stopPolling()
+   }
+ 
+   /** 立即刷新一次,非终态则每 intervalMs 再刷;终态自动停。 */
+@@ -126,6 +142,205 @@ export const useRunStore = defineStore('run', () => {
+     await refresh(runId, client)
+   }
+ 
++  // ── SSE 实时进度(架构设计 §6):事件流为主,轮询降级 ────────────────
++  // 连续 3 次连接失败降级轮询;onopen 清零,避免「连上又断」误判累计
++  const MAX_STREAM_FAILURES = 3
++  const streaming = ref(false)
++  // 运行期状态:进度(已完成/总数)与正在执行的步骤 —— 只由事件驱动,
++  // 统计卡仍只由汇总数据驱动(不从步骤事件合成)
++  const progress = ref<{ completed: number; total: number } | null>(null)
++  const runningStep = ref<{ stepIndex: number; stepName: string; stepType: string } | null>(null)
++  let source: StreamSource | null = null
++  let streamHandlers: Array<[string, EventListener]> = []
++  // 当前订阅的 run(null = 无活跃订阅)。await 恢复点与事件回调都校验它:
++  // 切换/关闭报告后,旧的 await 恢复与迟到事件不得写进新报告的状态
++  let streamRunId: string | null = null
++
++  /** 事件源只需监听/关闭这一子集:原生 EventSource 天然满足,
++   * 测试注入假事件源(完整 EventSource 接口在 jsdom 里没有)。 */
++  interface StreamSource {
++    addEventListener(type: string, listener: EventListener): void
++    removeEventListener(type: string, listener: EventListener): void
++    close(): void
++  }
++  type EventSourceFactory = (url: string) => StreamSource
++
++  function defaultEventSourceFactory(url: string): EventSource {
++    return new EventSource(url)
++  }
++
++  function handleRunStarted(payload: { started_at: string | null; total_steps: number }): void {
++    if (run.value === null) return
++    run.value = { ...run.value, status: 'running', started_at: payload.started_at }
++    progress.value = { completed: 0, total: payload.total_steps }
++  }
++
++  /** step.finished 按 step_index 幂等 upsert:快照路径下可能重复投递,无害。
++   * 运行期合成行只有摘要字段(请求/响应明细终态重拉后由数据库行补齐)。 */
++  function upsertStep(payload: {
++    step_index: number
++    step_name: string
++    status: string
++    duration_ms: number | null
++    assertion_total: number
++    assertion_passed: number
++  }): void {
++    const row: StepOut = {
++      // 负数哨兵 id:行 key 是 step_index,id 只需不与真实行冲突
++      id: -(payload.step_index + 1),
++      step_index: payload.step_index,
++      step_name: payload.step_name,
++      step_type: runningStep.value?.stepType ?? 'http',
++      status: payload.status,
++      duration_ms: payload.duration_ms ?? 0,
++      request: null,
++      response: null,
++      extracted_variables: {},
++      assertions: [],
++      assertion_total: payload.assertion_total,
++      assertion_passed: payload.assertion_passed,
++      error_message: null,
++    }
++    const idx = steps.value.findIndex((s) => s.step_index === payload.step_index)
++    if (idx >= 0) steps.value.splice(idx, 1, row)
++    else steps.value.push(row)
++    runningStep.value = null
++  }
++
++  /** run.snapshot 整体替换执行与步骤(服务端从数据库读出的权威现状,
++   * 首连/重连游标失效时到达):终态则停流,快照本身即权威,无需重拉。 */
++  function handleSnapshot(payload: {
++    run: RunOut
++    steps: StepOut[]
++    steps_truncated: boolean
++  }): void {
++    run.value = payload.run
++    steps.value = payload.steps
++    stepsTruncated.value = payload.steps_truncated
++    if (TERMINAL_STATUSES.has(payload.run.status)) {
++      runningStep.value = null
++      progress.value = null
++      stopStream()
++    }
++  }
++
++  function handleRunFinished(
++    runId: string,
++    client: ApiClient,
++    payload: { status: string; summary: RunOut['summary'] },
++  ): void {
++    if (run.value !== null) {
++      run.value = { ...run.value, status: payload.status, summary: payload.summary }
++    }
++    runningStep.value = null
++    progress.value = null
++    stopStream()
++    // 重拉一次:用数据库权威行替换运行期依据事件合成的状态
++    void refresh(runId, client)
++  }
++
++  /** 订阅报告详情的事件流:先 refresh 打底(已终态则不必订阅),
++   * 无原生 EventSource 的环境(jsdom)直接降级为轮询。 */
++  async function startStream(
++    runId: string,
++    client: ApiClient = api,
++    eventSourceFactory: EventSourceFactory = defaultEventSourceFactory,
++  ): Promise<void> {
++    stopStream()
++    stopPolling()
++    streamRunId = runId
++    try {
++      // 先取数、守卫后再写:无条件写入会在 await 期间竞态,
++      // 把已切换/卸载的旧 run 数据写进新报告的状态
++      const [runRow, stepRows] = await Promise.all([
++        fetchRun(runId, client),
++        fetchSteps(runId, client),
++      ])
++      if (streamRunId !== runId) return // await 期间订阅已被停止/替换(如切换报告)
++      run.value = runRow
++      steps.value = stepRows.items
++      stepsTruncated.value = stepRows.truncated
++    } catch {
++      // 首刷失败也要留下能自愈的通道:轮询的下一跳会重试,不能搁浅在空页
++      if (streamRunId === runId) startPolling(runId, client)
++      return
++    }
++    if (run.value !== null && TERMINAL_STATUSES.has(run.value.status)) return
++
++    if (eventSourceFactory === defaultEventSourceFactory && typeof EventSource === 'undefined') {
++      startPolling(runId, client)
++      return
++    }
++
++    const es = eventSourceFactory(`/api/v1/runs/${runId}/events`)
++    source = es
++    streaming.value = true
++    const onStarted = (e: MessageEvent) => {
++      if (streamRunId === runId) handleRunStarted(JSON.parse(e.data))
++    }
++    const onStepStarted = (e: MessageEvent) => {
++      if (streamRunId !== runId) return
++      const payload: { step_index: number; step_name: string; step_type: string } = JSON.parse(
++        e.data,
++      )
++      runningStep.value = {
++        stepIndex: payload.step_index,
++        stepName: payload.step_name,
++        stepType: payload.step_type,
++      }
++    }
++    const onStepFinished = (e: MessageEvent) => {
++      if (streamRunId === runId) upsertStep(JSON.parse(e.data))
++    }
++    const onProgress = (e: MessageEvent) => {
++      if (streamRunId === runId) progress.value = JSON.parse(e.data)
++    }
++    const onFinished = (e: MessageEvent) => {
++      if (streamRunId === runId) handleRunFinished(runId, client, JSON.parse(e.data))
++    }
++    // 连接失败累计:连上(open)即清零,「连上又断」不算连续失败
++    let failures = 0
++    const onOpen = () => {
++      failures = 0
++    }
++    const onError = () => {
++      if (streamRunId !== runId) return
++      failures += 1
++      if (failures < MAX_STREAM_FAILURES) return
++      // 降级:流与轮询互斥,先停流再启轮询,页面功能不中断
++      stopStream()
++      startPolling(runId, client)
++    }
++    streamHandlers = [
++      [
++        'run.snapshot',
++        ((e: MessageEvent) => {
++          if (streamRunId === runId) handleSnapshot(JSON.parse(e.data))
++        }) as EventListener,
++      ],
++      ['run.started', onStarted as EventListener],
++      ['step.started', onStepStarted as EventListener],
++      ['step.finished', onStepFinished as EventListener],
++      ['run.progress', onProgress as EventListener],
++      ['run.finished', onFinished as EventListener],
++      ['open', onOpen as EventListener],
++      ['error', onError as EventListener],
++    ]
++    for (const [name, handler] of streamHandlers) es.addEventListener(name, handler)
++  }
++
++  /** 先摘回调再关闭:关闭后迟到的错误/事件不改变状态。 */
++  function stopStream(): void {
++    streamRunId = null
++    if (source === null) return
++    const es = source
++    source = null
++    for (const [name, handler] of streamHandlers) es.removeEventListener(name, handler)
++    streamHandlers = []
++    es.close()
++    streaming.value = false
++  }
++
+   // ── 上次执行用的环境:弹窗默认选中(按项目记) ────────────────────
+   function lastEnvId(projectId: number): number | null {
+     const raw = localStorage.getItem(lastEnvKey(projectId))
+@@ -141,6 +356,9 @@ export const useRunStore = defineStore('run', () => {
+     steps,
+     stepsTruncated,
+     polling,
++    streaming,
++    progress,
++    runningStep,
+     runItems,
+     nextCursor,
+     listLoading,
+@@ -152,6 +370,8 @@ export const useRunStore = defineStore('run', () => {
+     reset,
+     startPolling,
+     stopPolling,
++    startStream,
++    stopStream,
+     cancel,
+     lastEnvId,
+     rememberEnv,
+diff --git a/frontend/src/views/RunDetailView.vue b/frontend/src/views/RunDetailView.vue
+index b78816c..04b012c 100644
+--- a/frontend/src/views/RunDetailView.vue
++++ b/frontend/src/views/RunDetailView.vue
+@@ -46,12 +46,14 @@ const runStore = useRunStore()
+ const runId = routeParamsId(route.params.id)
+ 
+ onMounted(() => {
+-  // 报告详情是单例:先清掉上一条 run 的残留,再开始拉新报告
++  // 报告详情是单例:先清掉上一条 run 的残留,再开始拉新报告。
++  // 事件流为主(SSE);无 EventSource 的环境由 store 内部降级为轮询
+   runStore.reset()
+-  runStore.startPolling(runId, api)
++  void runStore.startStream(runId, api)
+ })
+ 
+ onBeforeUnmount(() => {
++  runStore.stopStream()
+   runStore.stopPolling()
+ })
+ 
+@@ -82,12 +84,13 @@ const durationText = () => {
+ }
+ 
+ // 快照明细按步骤展开/收起(前端设计 §6.2:先扫统计,再对失败步骤逐个看现场)
++// key 用 step_index:运行期事件合成行与终态数据库行切换时 key 稳定,展开态不丢
+ const expanded = ref<Set<number>>(new Set())
+ 
+ function toggleStep(step: StepOut): void {
+   const next = new Set(expanded.value)
+-  if (next.has(step.id)) next.delete(step.id)
+-  else next.add(step.id)
++  if (next.has(step.step_index)) next.delete(step.step_index)
++  else next.add(step.step_index)
+   expanded.value = next
+ }
+ </script>
+@@ -156,14 +159,30 @@ function toggleStep(step: StepOut): void {
+     />
+ 
+     <div class="step-list">
++      <!-- 执行期实时行:进度连续推进 + 正在执行的步骤(事件流驱动) -->
++      <div v-if="runStore.progress || runStore.runningStep" class="live-line">
++        <el-progress
++          v-if="runStore.progress"
++          class="live-progress"
++          :percentage="Math.round((runStore.progress.completed / runStore.progress.total) * 100)"
++          :stroke-width="8"
++        />
++        <span class="live-text">
++          {{
++            runStore.runningStep
++              ? `正在执行第 ${runStore.runningStep.stepIndex + 1} 步:${runStore.runningStep.stepName}`
++              : `${runStore.progress?.completed ?? 0}/${runStore.progress?.total ?? 0} 已完成`
++          }}
++        </span>
++      </div>
+       <div
+         v-for="step in runStore.steps"
+-        :key="step.id"
++        :key="step.step_index"
+         class="step-row"
+         :class="{ 'is-bad': step.status === 'failed' || step.status === 'error' }"
+       >
+         <div class="row-head" @click="toggleStep(step)">
+-          <el-icon class="chevron" :class="{ open: expanded.has(step.id) }">
++          <el-icon class="chevron" :class="{ open: expanded.has(step.step_index) }">
+             <ArrowRight />
+           </el-icon>
+           <el-tag :type="statusTag(step.status)" size="small">{{ step.status }}</el-tag>
+@@ -174,7 +193,7 @@ function toggleStep(step: StepOut): void {
+           <span class="duration">{{ step.duration_ms }}ms</span>
+         </div>
+ 
+-        <div v-if="expanded.has(step.id)" class="step-detail">
++        <div v-if="expanded.has(step.step_index)" class="step-detail">
+           <el-alert
+             v-if="step.error_message"
+             class="row-error"
+@@ -264,6 +283,22 @@ function toggleStep(step: StepOut): void {
+   gap: 8px;
+ }
+ 
++.live-line {
++  display: flex;
++  align-items: center;
++  gap: 12px;
++  margin-bottom: 10px;
++}
++
++.live-progress {
++  width: 200px;
++}
++
++.live-text {
++  color: var(--el-color-primary);
++  font-size: 13px;
++}
++
+ .step-row {
+   border: 1px solid var(--el-border-color-lighter);
+   border-radius: 6px;

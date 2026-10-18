@@ -27,7 +27,12 @@ async def get_db(request: Request) -> AsyncIterator[AsyncSession]:
             raise
 
 
-async def get_current_user(session: AsyncSession = Depends(get_db)) -> User:
+async def load_current_user(session: AsyncSession) -> User:
+    """查询当前用户(纯查询,不 yield 会话):get_current_user 与
+    SSE 端点的短会话依赖共用,认证仍是这一处的唯一改动点 ——
+    SSE 路由不能挂 yield 依赖(get_db 的清理在流结束后才跑,
+    会把连接占住整个 SSE 生命周期),但认证查询本身必须同源。
+    """
     result = await session.execute(select(User).where(User.username == SEED_USERNAME))
     user = result.scalar_one_or_none()
     if user is None:
@@ -37,3 +42,7 @@ async def get_current_user(session: AsyncSession = Depends(get_db)) -> User:
             message="种子用户不存在,请确认迁移已执行",
         )
     return user
+
+
+async def get_current_user(session: AsyncSession = Depends(get_db)) -> User:
+    return await load_current_user(session)

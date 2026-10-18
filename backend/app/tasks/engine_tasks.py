@@ -29,7 +29,7 @@ from app.engine.results import StepResult, response_size
 from app.engine.variables import compose_scope_variables
 from app.event_names import RUN_FINISHED, RUN_STARTED
 from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
-from app.run_events import StreamPublisher
+from app.run_events import StreamPublisher, finished_payload
 from app.tasks.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ def _publish_run_finished(
         run_id,
         max_len=settings.run_stream_max_len,
         ttl_seconds=settings.run_stream_ttl_seconds,
-    ).publish(RUN_FINISHED, {"status": status, "summary": summary})
+    ).publish(RUN_FINISHED, finished_payload(status, summary))
 
 
 @celery_app.task(name="engine.execute_run", bind=True)
@@ -236,7 +236,7 @@ def execute_run(self, run_id: str) -> None:
             }
             session.commit()
             # run.finished 由任务层发(与 run.started 成对):漏发会让前端永久挂起
-            publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
+            publisher.publish(RUN_FINISHED, finished_payload(run.status, run.summary))
     except OwnershipLost:
         return
     except Exception:
@@ -260,6 +260,6 @@ def execute_run(self, run_id: str) -> None:
         if publisher is None:
             _publish_run_finished(run_id, run.status, run.summary, settings)
         else:
-            publisher.publish(RUN_FINISHED, {"status": run.status, "summary": run.summary})
+            publisher.publish(RUN_FINISHED, finished_payload(run.status, run.summary))
     finally:
         sync_engine.dispose()
