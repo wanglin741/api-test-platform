@@ -430,6 +430,58 @@ describe('runStore.startStream', () => {
     expect(store.runningStep).toBeNull()
   })
 
+  it('run.snapshot:整体替换 run 与步骤;终态快照停流且不重拉', async () => {
+    setActivePinia(createPinia())
+    let runFetches = 0
+    const client = mockClient({
+      GET: vi.fn(async () => {
+        runFetches += 1
+        return okResponse(RUN_RUNNING)
+      }),
+    })
+    const store = useRunStore()
+    await store.startStream('r-1', client, (url) => new FakeEventSource(url))
+
+    // 打开已跑一半的执行:首连收到数据库权威现状
+    const SNAPSHOT_RUN = { ...RUN_RUNNING, status: 'running' }
+    FakeEventSource.instances[0]!.emit('run.snapshot', {
+      run: SNAPSHOT_RUN,
+      steps: [
+        {
+          id: 11,
+          step_index: 0,
+          step_name: '已完成步骤',
+          step_type: 'http',
+          status: 'passed',
+          duration_ms: 9,
+          extracted_variables: {},
+          assertions: [],
+          assertion_total: 1,
+          assertion_passed: 1,
+        },
+      ],
+      steps_truncated: true,
+    })
+
+    expect(store.run).toEqual(SNAPSHOT_RUN)
+    expect(store.steps).toHaveLength(1)
+    expect(store.stepsTruncated).toBe(true)
+    expect(store.streaming).toBe(true) // 运行中:继续收实时事件
+    const fetchesAfterSnapshot = runFetches // 打底 run+steps 共 2 次
+
+    // 终态快照:快照即权威,停流且不重拉
+    FakeEventSource.instances[0]!.emit('run.snapshot', {
+      run: { ...RUN_RUNNING, status: 'success', summary: { total: 1, passed: 1 } },
+      steps: [],
+      steps_truncated: false,
+    })
+
+    expect(store.run?.status).toBe('success')
+    expect(store.streaming).toBe(false)
+    expect(FakeEventSource.instances[0]!.closed).toBe(true)
+    expect(runFetches).toBe(fetchesAfterSnapshot) // 无终态重拉
+  })
+
   it('打开已终态的执行:不开流也不轮询', async () => {
     setActivePinia(createPinia())
     const client = mockClient({

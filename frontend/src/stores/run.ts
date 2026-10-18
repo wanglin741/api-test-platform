@@ -205,6 +205,23 @@ export const useRunStore = defineStore('run', () => {
     runningStep.value = null
   }
 
+  /** run.snapshot 整体替换执行与步骤(服务端从数据库读出的权威现状,
+   * 首连/重连游标失效时到达):终态则停流,快照本身即权威,无需重拉。 */
+  function handleSnapshot(payload: {
+    run: RunOut
+    steps: StepOut[]
+    steps_truncated: boolean
+  }): void {
+    run.value = payload.run
+    steps.value = payload.steps
+    stepsTruncated.value = payload.steps_truncated
+    if (TERMINAL_STATUSES.has(payload.run.status)) {
+      runningStep.value = null
+      progress.value = null
+      stopStream()
+    }
+  }
+
   function handleRunFinished(
     runId: string,
     client: ApiClient,
@@ -280,6 +297,12 @@ export const useRunStore = defineStore('run', () => {
       if (streamRunId === runId) handleRunFinished(runId, client, JSON.parse(e.data))
     }
     streamHandlers = [
+      [
+        'run.snapshot',
+        ((e: MessageEvent) => {
+          if (streamRunId === runId) handleSnapshot(JSON.parse(e.data))
+        }) as EventListener,
+      ],
       ['run.started', onStarted as EventListener],
       ['step.started', onStepStarted as EventListener],
       ['step.finished', onStepFinished as EventListener],

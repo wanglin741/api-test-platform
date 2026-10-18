@@ -16,7 +16,7 @@ from app.api.deps import SEED_USERNAME, get_current_user, get_db
 from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
-from app.event_names import TERMINAL_EVENT
+from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
 from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
 from app.run_events import stream_key
 from app.schemas.runs import (
@@ -160,14 +160,13 @@ async def get_run(
     return _run_out(run)
 
 
-@router.get("/{run_id}/steps", response_model=StepList)
-async def list_run_steps(
-    run_id: uuid.UUID,
-    session: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-) -> StepList:
-    await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
-    # 这张表禁止 SELECT *(数据模型 §9):显式列出明细需要的列,不抱走整行
+async def _load_step_items(
+    session: AsyncSession, run_id: uuid.UUID
+) -> tuple[list[StepOut], bool]:
+    """步骤明细加载:步骤明细接口与 run.snapshot 快照共用这一份实现。
+
+    这张表禁止 SELECT *(数据模型 §9):显式列出明细需要的列,不抱走整行。
+    """
     columns = (
         RunStepResult.id,
         RunStepResult.step_index,
@@ -239,6 +238,17 @@ async def list_run_steps(
                 error_message=row.error_message,
             )
         )
+    return items, truncated
+
+
+@router.get("/{run_id}/steps", response_model=StepList)
+async def list_run_steps(
+    run_id: uuid.UUID,
+    session: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> StepList:
+    await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
+    items, truncated = await _load_step_items(session, run_id)
     return StepList(items=items, count=len(items), truncated=truncated)
 
 
@@ -268,14 +278,20 @@ async def cancel_run(
     return CancelAck(run_id=run.id, status=run.status)
 
 
-async def _ensure_run_stream_access(run_id: uuid.UUID, request: Request) -> None:
-    """流开始前的认证 + 404 判定,短会话即用即释。
+async def _ensure_run_stream_access(
+    run_id: uuid.UUID,
+    request: Request,
+    events: str | None = Query(default=None),
+) -> frozenset[str] | None:
+    """流开始前的认证 + 404 判定 + 过滤参数校验,短会话即用即释。
 
     SSE 端点不能用 yield 依赖(get_db / get_current_user):其清理在流
     结束后才跑,会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在
-    响应开始前运行,认证失败 / 404 都在流开始前返回。认证查询与
-    get_current_user 保持同一缝(SEED_USERNAME),真实认证落地时同步换。
+    响应开始前运行,认证失败 / 404 / 非法过滤值都在流开始前返回 ——
+    生成器体里的异常无法变成 400。认证查询与 get_current_user 保持
+    同一缝(SEED_USERNAME),真实认证落地时同步换。返回过滤白名单。
     """
+    allowed = _resolve_event_filter(events)
     factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
     async with factory() as session:
         result = await session.execute(select(User).where(User.username == SEED_USERNAME))
@@ -286,40 +302,151 @@ async def _ensure_run_stream_access(run_id: uuid.UUID, request: Request) -> None
                 message="种子用户不存在,请确认迁移已执行",
             )
         await _get_run_or_404(session, run_id)
+    return allowed
+
+
+# 读循环参数提为模块常量:集成测试缩短空读间隔以覆盖「worker 被强杀、
+# 流里永无终态」的查库补偿路径,不必真等 60 秒
+READ_BLOCK_SECONDS = 10.0
+IDLE_DB_CHECK_SECONDS = 60.0
+
+
+def _parse_stream_id(raw: str) -> tuple[int, int] | None:
+    """「毫秒-序号」拆成数值对:游标比较必须按数值,按字符串比会错序。"""
+    ms, sep, seq = raw.partition("-")
+    if not sep or not ms.isdigit() or not seq.isdigit():
+        return None
+    return int(ms), int(seq)
+
+
+async def _stream_edge(client: redis_async.Redis, key: str, *, first: bool) -> str | None:
+    """流首(first)或流尾的消息 id;流不存在返回 None。"""
+    entries = await (client.xrange(key, count=1) if first else client.xrevrange(key, count=1))
+    return entries[0][0].decode() if entries else None
+
+
+def _resolve_event_filter(events: str | None) -> frozenset[str] | None:
+    """?events= 白名单过滤;非法取值立刻 400,不静默忽略。"""
+    if events is None:
+        return None
+    if events != "finished":
+        raise AppError(
+            message="events 仅支持 finished",
+            status_code=400,
+            code="invalid_events_filter",
+            details={"events": events},
+        )
+    return FINISHED_FILTER_EVENTS
+
+
+def _snapshot_payload(run: Run, steps: list[StepOut], truncated: bool) -> dict:
+    """run.snapshot 载荷:与报告详情接口同一份 schema 序列化(mode="json" 保日期可编码)。"""
+    return {
+        "run": _run_out(run).model_dump(mode="json"),
+        "steps": [s.model_dump(mode="json") for s in steps],
+        "steps_truncated": truncated,
+    }
 
 
 @router.get("/{run_id}/events", response_class=EventSourceResponse)
 async def stream_run_events(
     run_id: uuid.UUID,
-    _access: None = Depends(_ensure_run_stream_access),
+    request: Request,
+    _allowed: frozenset[str] | None = Depends(_ensure_run_stream_access),
 ) -> AsyncIterator[ServerSentEvent]:
     """SSE 实时进度事件流(架构设计 §6 / API设计 §5)。
 
-    #23 骨架:从流首重放,收到执行终态事件即关闭 —— 已结束的执行重放
-    完全部事件后自然收尾,运行中的执行推到终态为止。快照补偿 /
-    Last-Event-ID 续传 / ?events= 过滤在后续票落地。
+    起点判定:无 Last-Event-ID(首次连接)、流为空、或游标早于流首 ⇒
+    快照路径 —— 先取流尾位置再读数据库(避免快照期间发布的事件被漏掉),
+    发 run.snapshot;执行已终态则补发 run.finished 并结束连接。游标仍
+    有效 ⇒ 重放路径,从游标之后续传。
+
+    补偿:连续空读约 60 秒查一次库(worker 被强杀、流里永无终态的场景),
+    已终态则补发 run.finished 并关闭,客户端不永久挂起。
 
     生成器端点由 FastAPI 路由层编码为 SSE、设置 text/event-stream 与
     Cache-Control / X-Accel-Buffering 两个头、自带 15 秒保活;每个连接
     自建异步 Redis 客户端(绑定当前事件循环,不跨连接复用),断开时
     finally 释放。
     """
+    allowed = _allowed
+    factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
     client = redis_async.Redis.from_url(get_settings().redis_url)
     try:
         key = stream_key(run_id)
+
         last_id = "0"
+        raw_cursor = request.headers.get("Last-Event-ID")
+        cursor = None
+        if raw_cursor and (parsed := _parse_stream_id(raw_cursor)) is not None:
+            head = await _stream_edge(client, key, first=True)
+            # 数值比较:游标 >= 流首才可信,早于流首说明该段已被裁剪,走快照
+            if head is not None and parsed >= _parse_stream_id(head):
+                cursor = raw_cursor
+
+        if cursor is None:
+            # 快照路径:流尾先于数据库读取取定,快照期间发布的事件都在其后,不漏
+            tail = await _stream_edge(client, key, first=False)
+            async with factory() as session:
+                run = await _get_run_or_404(session, run_id)
+                steps, truncated = await _load_step_items(session, run_id)
+            # run.snapshot 恒放行过滤:它是客户端重新同步的唯一入口
+            yield ServerSentEvent(
+                raw_data=json.dumps(
+                    _snapshot_payload(run, steps, truncated), ensure_ascii=False, default=str
+                ),
+                event=RUN_SNAPSHOT,
+            )
+            if run.status in RUN_TERMINAL_STATUSES:
+                # 终态在流里可能已被裁剪:用数据库事实补发,连接自然收尾
+                yield ServerSentEvent(
+                    raw_data=json.dumps(
+                        {"status": run.status, "summary": run.summary},
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    event=RUN_FINISHED,
+                )
+                return
+            last_id = tail or "0"
+        else:
+            last_id = cursor
+
+        idle_seconds = 0.0
         while True:
-            batches = await client.xread({key: last_id}, block=10_000, count=100)
-            for _stream, messages in batches or ():
+            batches = await client.xread(
+                {key: last_id}, block=int(READ_BLOCK_SECONDS * 1000), count=100
+            )
+            if not batches:
+                idle_seconds += READ_BLOCK_SECONDS
+                if idle_seconds >= IDLE_DB_CHECK_SECONDS:
+                    idle_seconds = 0.0
+                    async with factory() as session:
+                        run = await session.get(Run, run_id)
+                    if run is not None and run.status in RUN_TERMINAL_STATUSES:
+                        yield ServerSentEvent(
+                            raw_data=json.dumps(
+                                {"status": run.status, "summary": run.summary},
+                                ensure_ascii=False,
+                                default=str,
+                            ),
+                            event=RUN_FINISHED,
+                        )
+                        return
+                continue
+            idle_seconds = 0.0
+
+            for _stream, messages in batches:
                 for message_id, fields in messages:
                     last_id = message_id
                     event = fields[b"event"].decode()
                     # data 已是 JSON 字符串,用 raw_data 原样透传,避免二次编码
-                    yield ServerSentEvent(
-                        raw_data=fields[b"data"].decode(),
-                        event=event,
-                        id=message_id.decode(),
-                    )
+                    if allowed is None or event in allowed:
+                        yield ServerSentEvent(
+                            raw_data=fields[b"data"].decode(),
+                            event=event,
+                            id=message_id.decode(),
+                        )
                     if event == TERMINAL_EVENT:
                         return  # 终态即关:浏览器侧不再挂着连接
     finally:
