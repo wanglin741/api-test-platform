@@ -492,7 +492,10 @@ async function save(): Promise<boolean> {
   flex-shrink: 0;
 }
 
-.step-item:hover .ops {
+/* 悬停行或选中行都常显操作按钮:调试面板引导用户「点击调试」,
+   按钮若只在 hover 时现身,第一次用根本找不到 */
+.step-item:hover .ops,
+.step-item.active .ops {
   display: inline-flex;
 }
 
