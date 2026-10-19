@@ -20,7 +20,7 @@ from app.engine.assertions import evaluate_all
 from app.engine.context import EngineContext
 from app.engine.dsl import RequestBody, StepSpec
 from app.engine.extractors import ExtractionFailure, extract_value
-from app.engine.results import RequestSnapshot, ResponseSnapshot, StepResult
+from app.engine.results import CaseRef, RequestSnapshot, ResponseSnapshot, StepResult
 from app.engine.variables import VariableResolutionError, VariableScope, stringify
 from app.event_names import STEP_STARTED
 
@@ -98,6 +98,7 @@ async def run_http_step(
     client: httpx.AsyncClient,
     default_timeout_ms: int,
     step_index: int = 0,
+    case_ref: CaseRef | None = None,
 ) -> StepResult:
     result = StepResult(step_id=step.id, step_name=step.name, step_index=step_index, status="passed")
 
@@ -138,10 +139,15 @@ async def run_http_step(
         # 构建失败都没有「开始」;重试不重发。事件归属引擎(逐步事实),
         # 载荷字段与落库列同源(step_index/step_name/step_type)
         if attempt == 1:
-            context.publisher.publish(
-                STEP_STARTED,
-                {"step_index": step_index, "step_name": step.name, "step_type": step.type},
-            )
+            started_payload = {
+                "step_index": step_index,
+                "step_name": step.name,
+                "step_type": step.type,
+            }
+            if case_ref is not None:
+                started_payload["case_index"] = case_ref.case_index
+                started_payload["case_name"] = case_ref.case_name
+            context.publisher.publish(STEP_STARTED, started_payload)
 
         if prepared.content_type and not any(
             k.lower() == "content-type" for k in headers

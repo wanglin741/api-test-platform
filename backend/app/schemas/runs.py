@@ -8,8 +8,11 @@ from pydantic import BaseModel, Field
 
 
 class RunCreate(BaseModel):
-    case_id: int
-    environment_id: int
+    """触发目标二选一:case_id(单用例)或 plan_id(计划);计划执行可覆盖环境。"""
+
+    case_id: int | None = None
+    plan_id: int | None = None
+    environment_id: int | None = None
 
 
 class RunTriggered(BaseModel):
@@ -20,8 +23,9 @@ class RunTriggered(BaseModel):
 class RunOut(BaseModel):
     run_id: uuid.UUID
     project_id: int
-    case_id: int
-    case_version: int
+    case_id: int | None = None
+    case_version: int | None = None
+    plan_id: int | None = None
     environment_id: int
     trigger_mode: str
     status: str
@@ -63,6 +67,9 @@ class StepOut(BaseModel):
     step_type: str
     status: str
     duration_ms: int
+    # 用例归属:计划执行的明细按 (case_index, step_index) 分组;单用例为缺省值
+    case_index: int = 0
+    case_id: int | None = None
     request: RequestSnapshotOut | None = None
     response: ResponseSnapshotOut | None = None
     extracted_variables: dict[str, Any]

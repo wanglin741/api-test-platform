@@ -38,6 +38,15 @@ class AssertionResult:
 
 
 @dataclass
+class CaseRef:
+    """计划执行时的用例归属(事件与落库共用)。单用例执行不传,字段取缺省。"""
+
+    case_index: int
+    case_id: int | None
+    case_name: str
+
+
+@dataclass
 class StepResult:
     step_id: str
     step_name: str
@@ -50,6 +59,9 @@ class StepResult:
     attempts: int = 1
     extracted: dict[str, Any] = field(default_factory=dict)
     assertions: list[AssertionResult] = field(default_factory=list)
+    # 用例归属:计划执行时由计划执行器填;单用例执行保持缺省(0/None)
+    case_index: int = 0
+    case_id: int | None = None
 
 
 @dataclass

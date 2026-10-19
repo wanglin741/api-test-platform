@@ -876,12 +876,17 @@ export interface components {
        */
       truncated: boolean
     }
-    /** RunCreate */
+    /**
+     * RunCreate
+     * @description 触发目标二选一:case_id(单用例)或 plan_id(计划);计划执行可覆盖环境。
+     */
     RunCreate: {
       /** Case Id */
-      case_id: number
+      case_id?: number | null
+      /** Plan Id */
+      plan_id?: number | null
       /** Environment Id */
-      environment_id: number
+      environment_id?: number | null
     }
     /** RunOut */
     RunOut: {
@@ -893,9 +898,11 @@ export interface components {
       /** Project Id */
       project_id: number
       /** Case Id */
-      case_id: number
+      case_id?: number | null
       /** Case Version */
-      case_version: number
+      case_version?: number | null
+      /** Plan Id */
+      plan_id?: number | null
       /** Environment Id */
       environment_id: number
       /** Trigger Mode */
@@ -995,6 +1002,13 @@ export interface components {
       status: string
       /** Duration Ms */
       duration_ms: number
+      /**
+       * Case Index
+       * @default 0
+       */
+      case_index: number
+      /** Case Id */
+      case_id?: number | null
       request?: components['schemas']['RequestSnapshotOut'] | null
       response?: components['schemas']['ResponseSnapshotOut'] | null
       /** Extracted Variables */

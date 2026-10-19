@@ -43,7 +43,7 @@ GET /projects/1/runs?cursor=eyJ...&limit=20
 
 `run` 是全库增长最快的表,偏移分页在 `OFFSET 100000` 时要扫描并丢弃十万行。执行记录列表只支持「下一页」,不支持跳页 —— 这是有意的取舍。
 
-`run_step_result` 不分页,一次返回该次执行的全部步骤(单次执行通常几百到几千行),超过 2000 行时截断并在响应里标记 `truncated: true`。
+`run_step_result` 不分页,一次返回该次执行的全部步骤(单次执行通常几百到几千行),超过 2000 行时截断并在响应里标记 `truncated: true`。每行带 `case_index` / `case_id` 用例归属并按 `(case_index, step_index)` 排序 —— 计划执行的报告据此分组;单用例执行两字段为缺省值(`case_index` 0)。
 
 ### 错误格式
 
@@ -246,7 +246,9 @@ audit-logs
 }
 ```
 
-`plan_id` 与 `case_id` 二选一(单用例调试执行走 `/cases/{cid}/debug`,但 CI 场景下用同一个端点更方便)。
+`plan_id` 与 `case_id` 二选一(单用例调试执行走 `/cases/{cid}/debug`,但 CI 场景下用同一个端点更方便)。两者同给或同缺 → 422 `run_target_invalid`。
+
+计划触发时:`environment_id` 覆盖计划的默认环境,两者都缺 → 422 `environment_required`;并行计划暂未开放(422 `plan_mode_unsupported`);清单为空 → 422 `plan_items_empty`。单用例触发必须带 `environment_id`。
 
 响应 **202 Accepted**:
 
@@ -321,12 +323,12 @@ data: {"status": "success", "summary": {...}}
 
 | `event` | 触发时机 | 载荷 |
 |---|---|---|
-| `run.started` | 执行开始(任务层发) | `{total_steps, started_at}` |
-| `step.started` | 步骤构建成功、真正发请求前(引擎发) | `{step_index, step_name, step_type}` |
-| `step.finished` | 步骤结束(引擎发) | `{step_index, step_name, step_type, status, duration_ms, assertion_total, assertion_passed}`(duration_ms 为整数毫秒;被跳过的步骤不发 `step.started`,类型随本事件下发) |
-| `run.progress` | 每步之后(**限流 1/s,限流在发布器**) | `{completed, total}` |
+| `run.started` | 执行开始(任务层发) | `{total_steps, started_at}`(计划执行时 total_steps 为全计划步数) |
+| `step.started` | 步骤构建成功、真正发请求前(引擎发) | `{step_index, step_name, step_type}`(计划执行另附 `case_index, case_name`;单用例执行不带 —— 前端按字段有无区分模式) |
+| `step.finished` | 步骤结束(引擎发) | `{step_index, step_name, step_type, status, duration_ms, assertion_total, assertion_passed}`(duration_ms 为整数毫秒;被跳过的步骤不发 `step.started`,类型随本事件下发;计划执行另附 `case_index, case_name`) |
+| `run.progress` | 每步之后(**限流 1/s,限流在发布器**) | `{completed, total}`(计划执行连续计数,不随用例切换重置) |
 | `run.finished` | 进入终态(任务层发) | `{status, summary}` |
-| `run.snapshot` | 首连/游标失效时(SSE 端点发) | `{run, steps, steps_truncated}` |
+| `run.snapshot` | 首连/游标失效时(SSE 端点发) | `{run, steps, steps_truncated}`(步骤行自带用例归属字段) |
 
 `step.started` 让 UI 能显示「正在执行第 N 步」而不是只在完成后跳数字。被跳过的步骤只发 `step.finished` 不发 `step.started`(跳过没有「开始」)。
 

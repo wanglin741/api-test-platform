@@ -198,6 +198,9 @@ export const useRunStore = defineStore('run', () => {
     duration_ms: number | null
     assertion_total: number
     assertion_passed: number
+    /** 计划执行的用例归属(#30):单用例事件不带,行取缺省 0 */
+    case_index?: number
+    case_id?: number | null
   }): void {
     const idx = steps.value.findIndex((s) => s.step_index === payload.step_index)
     const prev = idx >= 0 ? steps.value[idx] : undefined
@@ -210,6 +213,8 @@ export const useRunStore = defineStore('run', () => {
       step_type: payload.step_type ?? runningStep.value?.stepType ?? prev?.step_type ?? 'http',
       status: payload.status,
       duration_ms: payload.duration_ms ?? 0,
+      case_index: payload.case_index ?? prev?.case_index ?? 0,
+      case_id: payload.case_id ?? prev?.case_id ?? null,
       request: prev?.request ?? null,
       response: prev?.response ?? null,
       extracted_variables: prev?.extracted_variables ?? {},

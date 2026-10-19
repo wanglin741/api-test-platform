@@ -23,12 +23,27 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.db.session import make_sync_engine, make_sync_session_factory
-from app.engine import EngineContext, execute as engine_execute
+from app.engine import (
+    EngineContext,
+    PlanCase,
+    execute as engine_execute,
+    execute_plan as engine_execute_plan,
+)
 from app.engine.dsl import parse_dsl
 from app.engine.results import StepResult, response_size
 from app.engine.variables import compose_scope_variables
 from app.event_names import RUN_FINISHED, RUN_STARTED
-from app.models import RUN_TERMINAL_STATUSES, Environment, Run, RunStepResult, TestCaseVersion, Variable
+from app.models import (
+    RUN_TERMINAL_STATUSES,
+    Environment,
+    Run,
+    RunStepResult,
+    TestCase,
+    TestCaseVersion,
+    TestPlan,
+    TestPlanItem,
+    Variable,
+)
 from app.run_events import StreamPublisher, finished_payload
 from app.tasks.celery_app import celery_app
 
@@ -58,9 +73,19 @@ class RedisCancellationToken:
 
 
 class DbSink:
-    """每步结束立即写 run_step_result 并提交 —— 执行中查询即可看到已完成步骤。"""
+    """每步结束立即写 run_step_result 并提交 —— 执行中查询即可看到已完成步骤。
 
-    def __init__(self, session: Session, run_id: uuid.UUID, worker_id: str, step_types: dict[int, str]) -> None:
+    step_types 按用例序号分组:单用例执行传 {0: {...}},计划执行传
+    {case_index: {step_index: step_type}}(结果行的 case_index 缺省 0,两形统一)。
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        run_id: uuid.UUID,
+        worker_id: str,
+        step_types: dict[int, dict[int, str]],
+    ) -> None:
         self._session = session
         self._run_id = run_id
         self._worker_id = worker_id
@@ -83,9 +108,11 @@ class DbSink:
             run_id=self._run_id,
             step_index=result.step_index,
             step_name=result.step_name,
-            step_type=self._step_types.get(result.step_index, "http"),
+            step_type=self._step_types.get(result.case_index, {}).get(result.step_index, "http"),
             status=result.status,
             duration_ms=int(result.duration_ms or 0),
+            case_index=result.case_index,
+            case_id=result.case_id,
             request_method=request.method if request else None,
             request_url=request.url if request else None,
             request_headers=request.headers if request else None,
@@ -162,13 +189,44 @@ def execute_run(self, run_id: str) -> None:
             session.commit()
             session.refresh(run)  # 取回 DB 生成的时间戳
 
-            version = session.execute(
-                select(TestCaseVersion).where(
-                    TestCaseVersion.test_case_id == run.case_id,
-                    TestCaseVersion.version == run.case_version,
-                )
-            ).scalar_one()
-            dsl = parse_dsl(version.dsl)
+            # ── 组装执行输入:单用例锁一个版本,计划锁整份清单的当前版本 ──
+            plan_cases: list[PlanCase] = []
+            if run.plan_id is not None:
+                plan = session.get(TestPlan, run.plan_id)
+                items = session.execute(
+                    select(TestPlanItem)
+                    .where(TestPlanItem.plan_id == run.plan_id)
+                    .order_by(TestPlanItem.sort_order, TestPlanItem.id)
+                ).scalars()
+                for item in items:
+                    case = session.get(TestCase, item.item_id)
+                    if case is None or case.deleted_at is not None:
+                        raise LookupError(f"计划用例已不存在: {item.item_id}")
+                    version = session.execute(
+                        select(TestCaseVersion).where(
+                            TestCaseVersion.test_case_id == item.item_id,
+                            TestCaseVersion.version == case.current_version,
+                        )
+                    ).scalar_one()
+                    plan_cases.append(
+                        PlanCase(case_id=item.item_id, case_name=case.name, dsl=parse_dsl(version.dsl))
+                    )
+                total_steps = sum(len(pc.dsl.steps) for pc in plan_cases)
+                step_types = {
+                    i: {j: step.type for j, step in enumerate(pc.dsl.steps)}
+                    for i, pc in enumerate(plan_cases)
+                }
+            else:
+                version = session.execute(
+                    select(TestCaseVersion).where(
+                        TestCaseVersion.test_case_id == run.case_id,
+                        TestCaseVersion.version == run.case_version,
+                    )
+                ).scalar_one()
+                dsl = parse_dsl(version.dsl)
+                total_steps = len(dsl.steps)
+                step_types = {0: {i: step.type for i, step in enumerate(dsl.steps)}}
+
             project_vars, env_vars = _load_variables(session, run)
 
             redis_client = redis_py.Redis.from_url(settings.redis_url)
@@ -180,10 +238,7 @@ def execute_run(self, run_id: str) -> None:
                 ttl_seconds=settings.run_stream_ttl_seconds,
                 progress_interval_ms=settings.run_progress_interval_ms,
             )
-            sink = DbSink(
-                session, run.id, worker_id,
-                {i: step.type for i, step in enumerate(dsl.steps)},
-            )
+            sink = DbSink(session, run.id, worker_id, step_types)
 
             def http_client_factory(verify: bool = True) -> httpx.AsyncClient:
                 # 在引擎的事件循环内被调用,AsyncClient 不跨循环复用。
@@ -192,10 +247,10 @@ def execute_run(self, run_id: str) -> None:
                 #  不可达目标会变成代理的 502 响应,连接失败语义被吞掉)。
                 return httpx.AsyncClient(follow_redirects=True, verify=verify, trust_env=False)
 
-            # run.started 由任务层发:started_at 已取回 DB 时间,步数来自锁定的版本
+            # run.started 由任务层发:started_at 已取回 DB 时间,步数来自锁定的输入
             publisher.publish(
                 RUN_STARTED,
-                {"total_steps": len(dsl.steps), "started_at": run.started_at.isoformat()},
+                {"total_steps": total_steps, "started_at": run.started_at.isoformat()},
             )
 
             context = EngineContext(
@@ -210,7 +265,13 @@ def execute_run(self, run_id: str) -> None:
             # 引擎协程跑在独立线程的新事件循环里:worker 主线程是同步上下文,
             # eager 模式下则嵌在 API 的事件循环中,asyncio.run 两边都不能直接用
             with ThreadPoolExecutor(max_workers=1) as pool:
-                summary = pool.submit(asyncio.run, engine_execute(dsl, context)).result()
+                if run.plan_id is not None:
+                    summary = pool.submit(
+                        asyncio.run,
+                        engine_execute_plan(plan_cases, context, stop_on_fail=plan.stop_on_fail),
+                    ).result()
+                else:
+                    summary = pool.submit(asyncio.run, engine_execute(dsl, context)).result()
 
             # 终态写入前再校验所有权(僵尸 worker 保护)
             session.expire(run)
@@ -234,6 +295,23 @@ def execute_run(self, run_id: str) -> None:
                 "request_duration_ms": int(summary.duration_ms),
                 "pass_rate": round(summary.passed / executed, 3) if executed else 0,
             }
+            if run.plan_id is not None:
+                # 计划执行附用例级结果(含 skipped 用例 —— 它们没有步骤行,
+                # 无法从明细聚合得到),字段形状与步骤汇总一致(total/error 同名)
+                run.summary["cases"] = [
+                    {
+                        "case_index": o.case_index,
+                        "case_id": o.case_id,
+                        "case_name": o.case_name,
+                        "status": o.status,
+                        "total": o.total_steps,
+                        "passed": o.passed,
+                        "failed": o.failed,
+                        "error": o.errored,
+                        "skipped": o.skipped,
+                    }
+                    for o in summary.cases
+                ]
             session.commit()
             # run.finished 由任务层发(与 run.started 成对):漏发会让前端永久挂起
             publisher.publish(RUN_FINISHED, finished_payload(run.status, run.summary))

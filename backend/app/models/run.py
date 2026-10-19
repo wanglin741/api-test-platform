@@ -10,6 +10,7 @@ import uuid
 
 from sqlalchemy import (
     CHAR,
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -44,8 +45,12 @@ class Run(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[int] = fk_column("project")
-    case_id: Mapped[int] = mapped_column(ForeignKey("test_case.id"), nullable=False)
-    case_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    # case_* 与 plan_id 二选一:单用例执行走 case_id,计划执行走 plan_id
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("test_case.id"), nullable=True)
+    case_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    plan_id: Mapped[int | None] = mapped_column(
+        ForeignKey("test_plan.id", name="fk_run_plan_id_test_plan"), nullable=True, index=True
+    )
     environment_id: Mapped[int] = fk_column("environment")
     trigger_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")
     triggered_by: Mapped[int | None] = mapped_column(ForeignKey("user.id"), nullable=True)
@@ -66,6 +71,7 @@ class RunStepResult(Base, TimestampMixin):
     __table_args__ = (
         CheckConstraint("status IN ('passed', 'failed', 'error', 'skipped')", name="status"),
         Index("ix_run_step_result_run_id_step_index", "run_id", "step_index"),
+        Index("ix_run_step_result_run_id_case_step", "run_id", "case_index", "step_index"),
         Index("ix_run_step_result_created_at", "created_at"),
     )
 
@@ -77,6 +83,10 @@ class RunStepResult(Base, TimestampMixin):
     step_name: Mapped[str] = mapped_column(String(255), nullable=False)
     step_type: Mapped[str] = mapped_column(String(32), nullable=False, default="http")
     parent_index: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 循环/条件体预留
+    # 用例归属:计划执行时 = (case_index, step_index);单用例执行保持缺省,
+    # 既有查询不受影响。case_id 是冗余副本、不设外键 —— 用例删除后历史报告仍可还原
+    case_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    case_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request_method: Mapped[str | None] = mapped_column(String(16), nullable=True)

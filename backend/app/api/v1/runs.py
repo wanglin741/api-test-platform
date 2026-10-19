@@ -17,7 +17,7 @@ from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
 from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
-from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
+from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, TestPlan, TestPlanItem, User
 from app.run_events import finished_payload, stream_key
 from app.schemas.runs import (
     CancelAck,
@@ -51,6 +51,7 @@ def _run_out(run: Run) -> RunOut:
         project_id=run.project_id,
         case_id=run.case_id,
         case_version=run.case_version,
+        plan_id=run.plan_id,
         environment_id=run.environment_id,
         trigger_mode=run.trigger_mode,
         status=run.status,
@@ -88,31 +89,75 @@ async def trigger_run(
 ) -> RunTriggered:
     await get_project_or_404(session, project_id)
 
-    case = await session.get(TestCase, payload.case_id)
-    if (
-        case is None
-        or case.deleted_at is not None
-        or case.project_id != project_id
-    ):
-        raise not_found("case", payload.case_id)  # 归属不符一律 404,不区分「不存在」与「不属于」
+    if (payload.case_id is None) == (payload.plan_id is None):
+        raise ValidationFailedError(
+            "case_id 与 plan_id 恰好二选一",
+            code="run_target_invalid",
+            details={"case_id": payload.case_id, "plan_id": payload.plan_id},
+        )
 
-    environment = await session.get(Environment, payload.environment_id)
-    if (
-        environment is None
-        or environment.deleted_at is not None
-        or environment.project_id != project_id
-    ):
-        raise not_found("environment", payload.environment_id)
+    # ── 单用例触发(既有行为不变) ─────────────────────────────────
+    if payload.case_id is not None:
+        if payload.environment_id is None:
+            raise ValidationFailedError(
+                "单用例执行必须指定 environment_id", code="environment_required"
+            )
+        case = await session.get(TestCase, payload.case_id)
+        if (
+            case is None
+            or case.deleted_at is not None
+            or case.project_id != project_id
+        ):
+            raise not_found("case", payload.case_id)  # 归属不符一律 404,不区分「不存在」与「不属于」
+        environment = await _validate_environment(session, project_id, payload.environment_id)
+        run = Run(
+            project_id=project_id,
+            case_id=case.id,
+            case_version=case.current_version,  # 锁定版本:改用例不影响旧报告还原
+            environment_id=environment.id,
+            trigger_mode="manual",
+            triggered_by=user.id,
+            status="pending",
+        )
+    # ── 计划触发 ───────────────────────────────────────────────────
+    else:
+        plan = await session.get(TestPlan, payload.plan_id)
+        if plan is None or plan.deleted_at is not None or plan.project_id != project_id:
+            raise not_found("plan", payload.plan_id)
+        if plan.execute_mode == "parallel":
+            # 并行执行在 #32 接线;先明确拒绝,不静默降级串行
+            raise ValidationFailedError(
+                "并行计划执行尚未开放",
+                code="plan_mode_unsupported",
+                details={"plan_id": plan.id, "execute_mode": plan.execute_mode},
+            )
+        item_count = await session.scalar(
+            select(func.count()).select_from(TestPlanItem).where(TestPlanItem.plan_id == plan.id)
+        )
+        if not item_count:
+            raise ValidationFailedError(
+                "计划没有用例,先在计划详情里编排清单",
+                code="plan_items_empty",
+                details={"plan_id": plan.id},
+            )
+        # 请求体的 environment_id 覆盖计划默认(数据模型 §8「运行时指定则覆盖」)
+        environment_id = payload.environment_id or plan.environment_id
+        if environment_id is None:
+            raise ValidationFailedError(
+                "计划未配置默认环境,触发时必须指定 environment_id",
+                code="environment_required",
+                details={"plan_id": plan.id},
+            )
+        environment = await _validate_environment(session, project_id, environment_id)
+        run = Run(
+            project_id=project_id,
+            plan_id=plan.id,
+            environment_id=environment.id,
+            trigger_mode="manual",
+            triggered_by=user.id,
+            status="pending",
+        )
 
-    run = Run(
-        project_id=project_id,
-        case_id=case.id,
-        case_version=case.current_version,  # 锁定版本:改用例不影响旧报告还原
-        environment_id=environment.id,
-        trigger_mode="manual",
-        triggered_by=user.id,
-        status="pending",
-    )
     session.add(run)
     # 先提交再投递:worker(真实或 eager)用独立会话读 run,未提交的插入对它不可见
     await session.commit()
@@ -123,6 +168,19 @@ async def trigger_run(
 
     response.headers["Location"] = f"/api/v1/runs/{run.id}"
     return RunTriggered(run_id=run.id, status=run.status)
+
+
+async def _validate_environment(
+    session: AsyncSession, project_id: int, environment_id: int
+) -> Environment:
+    environment = await session.get(Environment, environment_id)
+    if (
+        environment is None
+        or environment.deleted_at is not None
+        or environment.project_id != project_id
+    ):
+        raise not_found("environment", environment_id)
+    return environment
 
 
 @project_router.get("", response_model=RunPage)
@@ -174,6 +232,8 @@ async def _load_step_items(
         RunStepResult.step_type,
         RunStepResult.status,
         RunStepResult.duration_ms,
+        RunStepResult.case_index,
+        RunStepResult.case_id,
         RunStepResult.request_method,
         RunStepResult.request_url,
         RunStepResult.request_headers,
@@ -192,7 +252,7 @@ async def _load_step_items(
     result = await session.execute(
         select(*columns)
         .where(RunStepResult.run_id == run_id)
-        .order_by(RunStepResult.step_index)
+        .order_by(RunStepResult.case_index, RunStepResult.step_index)
         .limit(STEPS_HARD_CAP + 1)
     )
     rows = result.all()
@@ -214,6 +274,8 @@ async def _load_step_items(
                 step_type=row.step_type,
                 status=row.status,
                 duration_ms=row.duration_ms,
+                case_index=row.case_index,
+                case_id=row.case_id,
                 request=RequestSnapshotOut(
                     method=row.request_method or "",
                     url=row.request_url or "",

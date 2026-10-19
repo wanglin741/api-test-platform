@@ -5,15 +5,19 @@
 """
 
 from app.engine.context import EngineContext
+from app.engine.plan_runner import PlanCase, PlanSummary, execute_plan
 from app.engine.results import AssertionResult, RequestSnapshot, ResponseSnapshot, RunSummary, StepResult
 from app.engine.runner import execute
 
 __all__ = [
     "AssertionResult",
     "EngineContext",
+    "PlanCase",
+    "PlanSummary",
     "RequestSnapshot",
     "ResponseSnapshot",
     "RunSummary",
     "StepResult",
     "execute",
+    "execute_plan",
 ]

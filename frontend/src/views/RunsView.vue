@@ -85,11 +85,14 @@ const rerunEnvId = computed(() => rerunTarget.value?.environmentId ?? null)
         <span class="run-id">{{ item.run_id }}</span>
         <span class="status">{{ item.status }}</span>
         <span>{{ envName(item.environment_id) }}</span>
-        <span>#{{ item.case_id }}(v{{ item.case_version }})</span>
+        <!-- 计划执行无单用例归属:显示计划号,重跑入口随 #31 -->
+        <span v-if="item.plan_id != null">计划 #{{ item.plan_id }}</span>
+        <span v-else>#{{ item.case_id }}(v{{ item.case_version }})</span>
         <span>{{ passRate(item) }}</span>
         <span>{{ item.duration_ms === null ? '-' : `${item.duration_ms}ms` }}</span>
         <span>{{ item.created_at }}</span>
         <el-button
+          v-if="item.case_id != null"
           class="rerun-btn"
           size="small"
           text

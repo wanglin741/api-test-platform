@@ -16,13 +16,23 @@ import httpx
 
 from app.engine.context import EngineContext
 from app.engine.dsl import CaseDSL
-from app.engine.results import RunStatus, RunSummary, StepResult
+from app.engine.results import CaseRef, RunStatus, RunSummary, StepResult
 from app.engine.steps.http import run_http_step
 from app.engine.variables import VariableScope
 from app.event_names import RUN_PROGRESS, STEP_FINISHED
 
 
-async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
+async def execute(
+    dsl: CaseDSL,
+    context: EngineContext,
+    *,
+    case_ref: CaseRef | None = None,
+    progress_base: int = 0,
+    progress_total: int | None = None,
+) -> RunSummary:
+    """单用例执行。计划执行器传入 case_ref / 进度基准:事件与落库带用例归属,
+    run.progress 以全计划为口径(completed = 此前用例已完成步骤 + 本用例推进)。
+    缺省参数下单用例行为与载荷完全不变。"""
     scope = VariableScope(
         project=context.project_variables,
         environment=context.environment_variables,
@@ -71,7 +81,7 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
             else:
                 result = await run_http_step(
                     step, scope, context, _client_for(step.request.verify_ssl),
-                    dsl.config.timeout_ms, step_index=index,
+                    dsl.config.timeout_ms, step_index=index, case_ref=case_ref,
                 )
                 result.step_index = index
                 if (
@@ -80,6 +90,11 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
                 ):
                     fail_fast_hit = True
 
+            # 计划执行:归属写进出参(含跳过步骤的行),落库与事件共用这份事实
+            if case_ref is not None:
+                result.case_index = case_ref.case_index
+                result.case_id = case_ref.case_id
+
             results.append(result)
             # 每步立即回调,不批量缓冲(§11)—— 长跑期间轮询可见部分结果
             context.sink.on_step_finished(result)
@@ -87,20 +102,27 @@ async def execute(dsl: CaseDSL, context: EngineContext) -> RunSummary:
             # 来自 DSL 与落库列同源、duration_ms 与 DbSink 同取整);限流是
             # 发布器的投递策略,引擎每步都发进度,单测保持确定性
             passed = sum(1 for a in result.assertions if a.passed)
+            finished_payload = {
+                "step_index": index,
+                "step_name": result.step_name,
+                "step_type": step.type,
+                "status": result.status,
+                "duration_ms": None if result.duration_ms is None else int(result.duration_ms),
+                "assertion_total": len(result.assertions),
+                "assertion_passed": passed,
+            }
+            if case_ref is not None:
+                # 计划执行才带用例归属:单用例载荷不变,前端按字段存在性兼容
+                finished_payload["case_index"] = case_ref.case_index
+                finished_payload["case_name"] = case_ref.case_name
+            context.publisher.publish(STEP_FINISHED, finished_payload)
+            # 进度保持步骤级语义:计划口径下 completed/total 是全计划连续计数
             context.publisher.publish(
-                STEP_FINISHED,
+                RUN_PROGRESS,
                 {
-                    "step_index": index,
-                    "step_name": result.step_name,
-                    "step_type": step.type,
-                    "status": result.status,
-                    "duration_ms": None if result.duration_ms is None else int(result.duration_ms),
-                    "assertion_total": len(result.assertions),
-                    "assertion_passed": passed,
+                    "completed": progress_base + index + 1,
+                    "total": progress_total if progress_total is not None else len(dsl.steps),
                 },
-            )
-            context.publisher.publish(
-                RUN_PROGRESS, {"completed": index + 1, "total": len(dsl.steps)}
             )
     finally:
         for client in clients.values():
