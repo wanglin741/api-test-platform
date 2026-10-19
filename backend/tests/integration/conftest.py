@@ -62,7 +62,8 @@ def clean_tables(database: None) -> None:
     sync_url = os.environ["APITEST_DATABASE_URL_SYNC"].replace("+psycopg", "")
     with psycopg.connect(sync_url, autocommit=True) as conn:
         conn.execute(
-            "TRUNCATE run_step_result, run, test_case_version, test_case, folder, "
+            "TRUNCATE run_step_result, run, test_plan_item, test_plan, "
+            "test_case_version, test_case, folder, "
             "variable, environment, project RESTART IDENTITY CASCADE"
         )
     # 事件流的 Redis db 一并清空,用例之间互不可见

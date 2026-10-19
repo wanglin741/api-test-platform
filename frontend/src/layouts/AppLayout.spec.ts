@@ -7,13 +7,14 @@ import ElementPlus from 'element-plus'
 import AppLayout from './AppLayout.vue'
 
 describe('AppLayout', () => {
-  it('挂载:渲染侧边栏三项导航', async () => {
+  it('挂载:渲染侧边栏四项导航', async () => {
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
         { path: '/', component: AppLayout },
         { path: '/cases', component: { template: '<div />' } },
         { path: '/environments', component: { template: '<div />' } },
+        { path: '/plans', component: { template: '<div />' } },
         { path: '/runs', component: { template: '<div />' } },
       ],
     })
@@ -25,7 +26,7 @@ describe('AppLayout', () => {
     })
 
     const items = wrapper.findAll('.el-menu-item')
-    // issue #20:导航措辞对齐平台惯例,路由路径不变
-    expect(items.map((i) => i.text())).toEqual(['接口用例', '环境与变量', '测试报告'])
+    // issue #20:导航措辞对齐平台惯例,路由路径不变;#29 增加测试计划
+    expect(items.map((i) => i.text())).toEqual(['接口用例', '环境与变量', '测试计划', '测试报告'])
   })
 })

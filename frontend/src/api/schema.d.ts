@@ -94,6 +94,61 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/projects/{project_id}/plans': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List Plans */
+    get: operations['list_plans_api_v1_projects__project_id__plans_get']
+    put?: never
+    /** Create Plan */
+    post: operations['create_plan_api_v1_projects__project_id__plans_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/plans/{plan_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** Get Plan */
+    get: operations['get_plan_api_v1_plans__plan_id__get']
+    put?: never
+    post?: never
+    /** Delete Plan */
+    delete: operations['delete_plan_api_v1_plans__plan_id__delete']
+    options?: never
+    head?: never
+    /** Update Plan */
+    patch: operations['update_plan_api_v1_plans__plan_id__patch']
+    trace?: never
+  }
+  '/api/v1/plans/{plan_id}/items': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List Plan Items */
+    get: operations['list_plan_items_api_v1_plans__plan_id__items_get']
+    /** Replace Plan Items */
+    put: operations['replace_plan_items_api_v1_plans__plan_id__items_put']
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/projects/{project_id}/cases': {
     parameters: {
       query?: never
@@ -216,6 +271,39 @@ export interface paths {
     put?: never
     /** Cancel Run */
     post: operations['cancel_run_api_v1_runs__run_id__cancel_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/runs/{run_id}/events': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Stream Run Events
+     * @description SSE 实时进度事件流(架构设计 §6 / API设计 §5)。
+     *
+     *     起点判定:无 Last-Event-ID(首次连接)、流为空、或游标早于流首 ⇒
+     *     快照路径 —— 先取流尾位置再读数据库(避免快照期间发布的事件被漏掉),
+     *     发 run.snapshot;执行已终态则补发 run.finished 并结束连接。游标仍
+     *     有效 ⇒ 重放路径,从游标之后续传。
+     *
+     *     补偿:连续空读约 60 秒查一次库(worker 被强杀、流里永无终态的场景),
+     *     已终态则补发 run.finished 并关闭,客户端不永久挂起。
+     *
+     *     生成器端点由 FastAPI 路由层编码为 SSE、设置 text/event-stream 与
+     *     Cache-Control / X-Accel-Buffering 两个头、自带 15 秒保活;每个连接
+     *     自建异步 Redis 客户端(绑定当前事件循环,不跨连接复用),断开时
+     *     finally 释放。
+     */
+    get: operations['stream_run_events_api_v1_runs__run_id__events_get']
+    put?: never
+    post?: never
     delete?: never
     options?: never
     head?: never
@@ -608,6 +696,103 @@ export interface components {
     HTTPValidationError: {
       /** Detail */
       detail?: components['schemas']['ValidationError'][]
+    }
+    /** PlanCreate */
+    PlanCreate: {
+      /** Name */
+      name: string
+      /** Description */
+      description?: string | null
+      /** Environment Id */
+      environment_id?: number | null
+      /**
+       * Execute Mode
+       * @default serial
+       * @enum {string}
+       */
+      execute_mode: 'serial' | 'parallel'
+      /**
+       * Concurrency
+       * @default 1
+       */
+      concurrency: number
+      /**
+       * Stop On Fail
+       * @default false
+       */
+      stop_on_fail: boolean
+    }
+    /** PlanItemIn */
+    PlanItemIn: {
+      /** Case Id */
+      case_id: number
+    }
+    /** PlanItemOut */
+    PlanItemOut: {
+      /** Id */
+      id: number
+      /** Item Type */
+      item_type: string
+      /** Case Id */
+      case_id: number
+      /** Case Name */
+      case_name: string
+      /** Sort Order */
+      sort_order: number
+    }
+    /** PlanItemsPut */
+    PlanItemsPut: {
+      /** Items */
+      items: components['schemas']['PlanItemIn'][]
+    }
+    /** PlanOut */
+    PlanOut: {
+      /** Id */
+      id: number
+      /** Project Id */
+      project_id: number
+      /** Name */
+      name: string
+      /** Description */
+      description: string | null
+      /** Environment Id */
+      environment_id: number | null
+      /** Execute Mode */
+      execute_mode: string
+      /** Concurrency */
+      concurrency: number
+      /** Stop On Fail */
+      stop_on_fail: boolean
+      /**
+       * Item Count
+       * @default 0
+       */
+      item_count: number
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /** PlanUpdate */
+    PlanUpdate: {
+      /** Name */
+      name?: string | null
+      /** Description */
+      description?: string | null
+      /** Environment Id */
+      environment_id?: number | null
+      /** Execute Mode */
+      execute_mode?: ('serial' | 'parallel') | null
+      /** Concurrency */
+      concurrency?: number | null
+      /** Stop On Fail */
+      stop_on_fail?: boolean | null
     }
     /** ProjectCreate */
     ProjectCreate: {
@@ -1199,6 +1384,233 @@ export interface operations {
       }
     }
   }
+  list_plans_api_v1_projects__project_id__plans_get: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        project_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlanOut'][]
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_plan_api_v1_projects__project_id__plans_post: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        project_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlanCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlanOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  get_plan_api_v1_plans__plan_id__get: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        plan_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlanOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  delete_plan_api_v1_plans__plan_id__delete: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        plan_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  update_plan_api_v1_plans__plan_id__patch: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        plan_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlanUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlanOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_plan_items_api_v1_plans__plan_id__items_get: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        plan_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlanItemOut'][]
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  replace_plan_items_api_v1_plans__plan_id__items_put: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        plan_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['PlanItemsPut']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['PlanItemOut'][]
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
   list_cases_api_v1_projects__project_id__cases_get: {
     parameters: {
       query?: {
@@ -1548,6 +1960,39 @@ export interface operations {
         }
         content: {
           'application/json': components['schemas']['CancelAck']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  stream_run_events_api_v1_runs__run_id__events_get: {
+    parameters: {
+      query?: {
+        events?: string | null
+      }
+      header?: never
+      path: {
+        run_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'text/event-stream': unknown
         }
       }
       /** @description Validation Error */

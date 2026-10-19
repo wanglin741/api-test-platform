@@ -14,6 +14,7 @@ const route = useRoute()
         <!-- 导航措辞对齐平台惯例(issue #20);路由路径不变,避免书签失效 -->
         <el-menu-item index="/cases">接口用例</el-menu-item>
         <el-menu-item index="/environments">环境与变量</el-menu-item>
+        <el-menu-item index="/plans">测试计划</el-menu-item>
         <el-menu-item index="/runs">测试报告</el-menu-item>
       </el-menu>
     </el-aside>

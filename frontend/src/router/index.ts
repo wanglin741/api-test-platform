@@ -21,6 +21,12 @@ const router = createRouter({
           name: 'environments',
           component: () => import('@/views/EnvironmentsView.vue'),
         },
+        { path: 'plans', name: 'plans', component: () => import('@/views/PlanListView.vue') },
+        {
+          path: 'plans/:id',
+          name: 'plan-detail',
+          component: () => import('@/views/PlanDetailView.vue'),
+        },
         { path: 'runs', name: 'runs', component: () => import('@/views/RunsView.vue') },
         {
           path: 'runs/:id',

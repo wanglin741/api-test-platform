@@ -6,6 +6,7 @@ from app.models.folder import Folder
 from app.models.project import Project
 from app.models.run import RUN_TERMINAL_STATUSES, Run, RunStepResult
 from app.models.test_case import TestCase, TestCaseVersion
+from app.models.test_plan import TestPlan, TestPlanItem
 from app.models.user import User
 from app.models.variable import Variable
 
@@ -19,6 +20,8 @@ __all__ = [
     "RunStepResult",
     "TestCase",
     "TestCaseVersion",
+    "TestPlan",
+    "TestPlanItem",
     "User",
     "Variable",
 ]
