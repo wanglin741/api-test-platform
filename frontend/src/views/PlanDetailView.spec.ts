@@ -50,12 +50,17 @@ const ENV_DEV = { id: 3, name: 'dev' }
 const CASE_LOGIN = { id: 101, name: '登录' }
 const CASE_ORDER = { id: 102, name: '下单' }
 
-function mockGets({ items = [ITEM_LOGIN] as object[], plan = PLAN as object } = {}) {
+function mockGets({
+  items = [ITEM_LOGIN] as object[],
+  plan = PLAN as object,
+  runs = { items: [], next_cursor: null } as object,
+} = {}) {
   get.mockImplementation(async (path: unknown) => {
     const url = String(path)
     if (url.includes('/items')) return okResponse(items)
     if (url.includes('/environments')) return okResponse([ENV_DEV])
     if (url.includes('/cases')) return okResponse({ items: [CASE_LOGIN, CASE_ORDER], total: 2 })
+    if (url.includes('/runs')) return okResponse(runs)
     return okResponse(plan)
   })
 }
@@ -119,6 +124,44 @@ describe('PlanDetailView', () => {
     await flushPromises()
     const [, opts2] = put.mock.calls[0] as [string, { body: { items: { case_id: number }[] } }]
     expect(opts2.body.items).toEqual([{ case_id: 102 }])
+  })
+
+  it('最近执行:挂该计划的执行历史,点击进入报告(#33)', async () => {
+    mockGets({
+      runs: {
+        items: [
+          {
+            run_id: 'r-9',
+            plan_id: 1,
+            case_id: null,
+            case_version: null,
+            environment_id: 3,
+            trigger_mode: 'manual',
+            status: 'failed',
+            duration_ms: 88,
+            summary: { total: 3, passed: 2, failed: 1 },
+            created_at: '2026-01-02T00:00:00Z',
+          },
+        ],
+        next_cursor: null,
+      },
+    })
+    const wrapper = await mountView()
+
+    const rows = wrapper.findAll('.recent-row')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.text()).toContain('r-9')
+    expect(rows[0]!.text()).toContain('failed')
+
+    // 拉取时带 plan_id 筛选
+    const runsCall = get.mock.calls.find((call) => String(call[0]).includes('/runs')) as [
+      string,
+      { params: { query: Record<string, unknown> } },
+    ]
+    expect(runsCall[1].params.query.plan_id).toBe(1)
+
+    await rows[0]!.trigger('click')
+    expect(push).toHaveBeenCalledWith('/runs/r-9')
   })
 })
 

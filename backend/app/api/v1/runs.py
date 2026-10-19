@@ -181,11 +181,16 @@ async def list_project_runs(
     project_id: int,
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(default=None),
+    plan_id: int | None = Query(default=None),
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> RunPage:
     await get_project_or_404(session, project_id)
     stmt = select(Run).where(Run.project_id == project_id)
+    if plan_id is not None:
+        # 报告列表按计划筛选(计划外键索引):计划详情页「最近执行」与
+        # 列表页计划筛选共用
+        stmt = stmt.where(Run.plan_id == plan_id)
     if cursor is not None:
         created_at, run_id = _decode_cursor(cursor)
         # 行值比较同时锚定时间与 id:created_at 相同的相邻行不重不漏

@@ -56,6 +56,7 @@ export const useRunStore = defineStore('run', () => {
     client: ApiClient = api,
     cursor: string | null = null,
     limit = PAGE_SIZE,
+    planId: number | null = null,
   ): Promise<void> {
     listLoading.value = true
     try {
@@ -64,6 +65,7 @@ export const useRunStore = defineStore('run', () => {
       nextCursor.value = null
       const query: Record<string, unknown> = { limit }
       if (cursor !== null) query.cursor = cursor
+      if (planId !== null) query.plan_id = planId
       const { data } = await client.GET('/api/v1/projects/{project_id}/runs', {
         params: { path: { project_id: projectId }, query },
       })

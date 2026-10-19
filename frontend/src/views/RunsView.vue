@@ -9,6 +9,7 @@ import { api } from '@/api/client'
 import { useTriggerDialog } from '@/composables/trigger-dialog'
 import TriggerDialog from '@/components/TriggerDialog.vue'
 import { useEnvironmentStore } from '@/stores/environment'
+import { usePlanStore } from '@/stores/plan'
 import { useProjectStore } from '@/stores/project'
 import { useRunStore } from '@/stores/run'
 
@@ -19,15 +20,30 @@ const runStore = useRunStore()
 const { runItems, nextCursor, listLoading } = storeToRefs(runStore)
 const environmentStore = useEnvironmentStore()
 const { items: environments } = storeToRefs(environmentStore)
+const planStore = usePlanStore()
+const { items: plans } = storeToRefs(planStore)
+
+// ── 按计划筛选(#33):与计划详情「最近执行」共用 plan_id 查询参数 ──
+const filterPlanId = ref<number | null>(null)
 
 watch(
   currentId,
   async (projectId) => {
     if (projectId === null) return
-    await Promise.all([runStore.listRuns(projectId, api), environmentStore.load(projectId, api)])
+    filterPlanId.value = null // 切项目后旧计划的筛选失去意义,一并复位
+    await Promise.all([
+      runStore.listRuns(projectId, api),
+      environmentStore.load(projectId, api),
+      planStore.load(projectId, api),
+    ])
   },
   { immediate: true },
 )
+
+watch(filterPlanId, (planId) => {
+  if (currentId.value === null) return
+  void runStore.listRuns(currentId.value, api, null, 20, planId)
+})
 
 function envName(environmentId: number): string {
   return environments.value.find((env) => env.id === environmentId)?.name ?? `#${environmentId}`
@@ -69,6 +85,16 @@ const rerunEnvId = computed(() => rerunTarget.value?.environmentId ?? null)
     <el-empty description="请先在顶部选择或创建项目" />
   </div>
   <div v-else class="page" v-loading="listLoading">
+    <div class="filter-bar">
+      <el-select
+        v-model="filterPlanId"
+        clearable
+        placeholder="按计划筛选"
+        class="plan-filter"
+      >
+        <el-option v-for="plan in plans" :key="plan.id" :label="plan.name" :value="plan.id" />
+      </el-select>
+    </div>
     <div class="head">
       <span>Run</span>
       <span>状态</span>
@@ -123,6 +149,14 @@ const rerunEnvId = computed(() => rerunTarget.value?.environmentId ?? null)
 </template>
 
 <style scoped>
+.filter-bar {
+  margin-bottom: 12px;
+}
+
+.plan-filter {
+  width: 220px;
+}
+
 .head,
 .row {
   grid-template-columns: 1.2fr 90px 110px 1fr 80px 80px 180px 100px;

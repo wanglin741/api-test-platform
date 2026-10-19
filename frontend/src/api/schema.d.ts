@@ -1830,6 +1830,7 @@ export interface operations {
       query?: {
         limit?: number
         cursor?: string | null
+        plan_id?: number | null
       }
       header?: never
       path: {

@@ -110,6 +110,43 @@ async def test_invalid_cursor_422(client):
     assert resp.json()["error"]["code"] == "invalid_cursor"
 
 
+async def test_filter_by_plan_id(client):
+    project_id, env_id, case_id = await _setup(client, name="计划筛选项目")
+    plan = (
+        await client.post(f"/api/v1/projects/{project_id}/plans", json={"name": "筛选计划"})
+    ).json()
+    put = await client.put(
+        f"/api/v1/plans/{plan['id']}/items", json={"items": [{"case_id": case_id}]}
+    )
+    assert put.status_code == 200, put.text
+
+    # 混合动线:两条计划执行 + 一条单用例执行
+    plan_run_ids = []
+    for _ in range(2):
+        resp = await client.post(
+            f"/api/v1/projects/{project_id}/runs",
+            json={"plan_id": plan["id"], "environment_id": env_id},
+        )
+        assert resp.status_code == 202, resp.text
+        plan_run_ids.append(resp.json()["run_id"])
+    await _trigger(client, project_id, env_id, case_id)
+
+    # 按计划筛选:只有计划执行,倒序
+    body = (
+        await client.get(
+            f"/api/v1/projects/{project_id}/runs", params={"plan_id": plan["id"]}
+        )
+    ).json()
+    assert [r["run_id"] for r in body["items"]] == plan_run_ids[::-1]
+    assert all(r["plan_id"] == plan["id"] for r in body["items"])
+    # 计划行带 plan_id,单用例行 case_id 非空(列表出参二选一)
+    assert body["items"][0]["case_id"] is None
+
+    # 不带筛选仍是全量倒序(4 条)
+    body = (await client.get(f"/api/v1/projects/{project_id}/runs")).json()
+    assert len(body["items"]) == 3
+
+
 async def test_invalid_limit_422(client):
     project_id, _, _ = await _setup(client, name="非法limit项目")
     resp = await client.get(f"/api/v1/projects/{project_id}/runs", params={"limit": 0})

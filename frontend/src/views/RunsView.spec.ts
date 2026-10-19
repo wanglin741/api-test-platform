@@ -61,15 +61,32 @@ const RUN_A = {
 const PAGE_1 = { items: [RUN_A], next_cursor: 'cursor-page-2' }
 
 /** 按路径模板分流:path 是模板串,实际项目 id 在 opts.params.path 里。 */
-function mockRunsList(byProject: Record<string, unknown>, envs: object[] = [ENV_DEV]) {
+function mockRunsList(
+  byProject: Record<string, unknown>,
+  envs: object[] = [ENV_DEV],
+  plans: object[] = [],
+) {
   get.mockImplementation(
     async (path: unknown, opts?: { params?: { path?: { project_id?: number } } }) => {
       const url = String(path)
       if (url.includes('environments')) return okResponse(envs)
+      if (url.includes('/plans')) return okResponse(plans)
       const pid = String(opts?.params?.path?.project_id ?? '')
       return okResponse(byProject[pid] ?? { items: [], next_cursor: null })
     },
   )
+}
+
+const ElSelectStub = { name: 'ElSelectStub', template: '<div />' }
+
+async function mountWithSelectStub() {
+  setActivePinia(createPinia())
+  useProjectStore().currentId = 1
+  const wrapper = mount(RunsView, {
+    global: { plugins: [ElementPlus], stubs: { 'el-select': ElSelectStub } },
+  })
+  await flushPromises()
+  return wrapper
 }
 
 async function mountView() {
@@ -157,5 +174,33 @@ describe('RunsView', () => {
     const wrapper = await mountView()
 
     expect((wrapper.find('.pager .next').element as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('计划筛选:选计划后按 plan_id 拉取,清除后恢复全量(#33)', async () => {
+    mockRunsList({ 1: PAGE_1 }, [ENV_DEV], [
+      { id: 12, name: '回归计划' },
+      { id: 13, name: '冒烟计划' },
+    ])
+    // el-select 在 jsdom 里依赖真实布局做弹层定位,打桩后用 emit 驱动
+    const wrapper = await mountWithSelectStub()
+    const select = wrapper.findComponent({ name: 'ElSelectStub' })
+
+    select.vm.$emit('update:modelValue', 12)
+    await flushPromises()
+
+    let runsCalls = get.mock.calls.filter(
+      (call) => String(call[0]).includes('/runs') && !String(call[0]).includes('environments'),
+    )
+    let last = runsCalls.at(-1) as [string, { params: { query: Record<string, unknown> } }]
+    expect(last[1].params.query.plan_id).toBe(12)
+
+    select.vm.$emit('update:modelValue', null)
+    await flushPromises()
+
+    runsCalls = get.mock.calls.filter(
+      (call) => String(call[0]).includes('/runs') && !String(call[0]).includes('environments'),
+    )
+    last = runsCalls.at(-1) as [string, { params: { query: Record<string, unknown> } }]
+    expect(last[1].params.query.plan_id).toBeUndefined()
   })
 })

@@ -41,6 +41,8 @@ GET /projects/1/runs?cursor=eyJ...&limit=20
 → 200 {"items": [...], "next_cursor": "eyJ..."}
 ```
 
+可选 `plan_id` 查询参数按计划筛选(报告列表的「按计划筛选」与计划详情页「最近执行」共用;`run.plan_id` 有外键索引)。
+
 `run` 是全库增长最快的表,偏移分页在 `OFFSET 100000` 时要扫描并丢弃十万行。执行记录列表只支持「下一页」,不支持跳页 —— 这是有意的取舍。
 
 `run_step_result` 不分页,一次返回该次执行的全部步骤(单次执行通常几百到几千行),超过 2000 行时截断并在响应里标记 `truncated: true`。每行带 `case_index` / `case_id` 用例归属并按 `(case_index, step_index)` 排序 —— 计划执行的报告据此分组;单用例执行两字段为缺省值(`case_index` 0)。
@@ -190,7 +192,7 @@ plans
 
 runs
   POST   /projects/{pid}/runs              触发执行
-  GET    /projects/{pid}/runs              列表(游标分页)
+  GET    /projects/{pid}/runs              列表(游标分页,可按 plan_id 筛选)
   GET    /runs/{rid}
   GET    /runs/{rid}/steps                 步骤结果
   GET    /runs/{rid}/events                ★ SSE 实时进度

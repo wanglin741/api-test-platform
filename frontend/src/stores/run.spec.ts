@@ -28,6 +28,14 @@ const RUN_RUNNING = {
   finished_at: null,
 }
 
+const PLAN_RUN_ROW = {
+  ...RUN_RUNNING,
+  run_id: 'r-plan-1',
+  case_id: null,
+  case_version: null,
+  plan_id: 12,
+}
+
 describe('runStore', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -117,6 +125,23 @@ describe('runStore', () => {
     ]
     expect(path).toBe('/api/v1/projects/{project_id}/runs')
     expect(opts.params.query).toEqual({ limit: 20, cursor: 'cursor-1' })
+  })
+
+  it('listRuns:带 planId 时按计划筛选,翻页游标沿用(#33)', async () => {
+    setActivePinia(createPinia())
+    const client = mockClient({
+      GET: vi.fn(async () => okResponse({ items: [PLAN_RUN_ROW], next_cursor: null })),
+    })
+    const store = useRunStore()
+
+    await store.listRuns(1, client, null, 20, 12)
+
+    const [, opts] = (client.GET as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { params: { query: Record<string, string> } },
+    ]
+    expect(opts.params.query).toEqual({ limit: 20, plan_id: 12 })
+    expect(store.runItems).toEqual([PLAN_RUN_ROW])
   })
 
   it('轮询:非终态每 2s 刷新,到终态自动停', async () => {

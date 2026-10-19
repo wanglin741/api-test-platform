@@ -60,9 +60,41 @@ async function loadAll() {
         stop_on_fail: plan.stop_on_fail,
       }
     }
+    await loadRecentRuns()
   } finally {
     loading.value = false
   }
+}
+
+// ── 最近执行(#33):plan_id 筛选的报告列表,点击进入报告详情 ──
+interface RunRow {
+  run_id: string
+  status: string
+  created_at: string
+  duration_ms: number | null
+  summary: { total?: number; passed?: number } | null
+}
+const recentRuns = ref<RunRow[]>([])
+
+async function loadRecentRuns() {
+  const { data } = await api.GET('/api/v1/projects/{project_id}/runs', {
+    params: {
+      path: { project_id: currentId.value ?? 0 },
+      query: { limit: 5, plan_id: planId.value },
+    },
+  })
+  recentRuns.value = (data?.items ?? []) as RunRow[]
+}
+
+function openRun(runId: string) {
+  void router.push(`/runs/${runId}`)
+}
+
+function passRate(run: RunRow): string {
+  // 键名与 engine_tasks 落库一致(total),对齐报告列表页
+  if (!run.summary || typeof run.summary.total !== 'number') return '-'
+  const passed = typeof run.summary.passed === 'number' ? run.summary.passed : 0
+  return `${passed}/${run.summary.total}`
 }
 
 onMounted(loadAll)
@@ -259,6 +291,16 @@ onMounted(async () => {
       </el-form>
     </el-card>
 
+    <el-card header="最近执行" class="recent-card">
+      <el-empty v-if="recentRuns.length === 0" description="还没有执行记录" :image-size="60" />
+      <div v-for="run in recentRuns" :key="run.run_id" class="recent-row" @click="openRun(run.run_id)">
+        <span class="run-id">{{ run.run_id }}</span>
+        <span class="status">{{ run.status }}</span>
+        <span>{{ passRate(run) }}</span>
+        <span>{{ run.created_at }}</span>
+      </div>
+    </el-card>
+
     <el-card header="用例清单(拖拽调整执行顺序)" class="items-card">
       <div class="items-layout">
         <div class="pool">
@@ -377,6 +419,31 @@ onMounted(async () => {
 
 .case-name {
   flex: 1;
+}
+
+.recent-card {
+  margin-bottom: 16px;
+}
+
+.recent-row {
+  align-items: center;
+  border: 1px solid var(--el-border-color-light);
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  margin-bottom: 6px;
+  padding: 6px 10px;
+}
+
+.recent-row:hover {
+  background: var(--el-fill-color-light);
+}
+
+.recent-row .run-id {
+  flex: 1;
+  font-family: monospace;
+  font-size: 12px;
 }
 
 .save-items {
