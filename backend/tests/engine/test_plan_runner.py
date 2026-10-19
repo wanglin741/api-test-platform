@@ -207,3 +207,138 @@ async def test_empty_plan_returns_zero_summary(sink: InMemorySink) -> None:
     assert summary.status == "success"
     assert summary.cases == []
     assert publisher.events == []
+
+# ---------- 并行(#32)----------
+
+
+async def test_parallel_respects_concurrency_limit(sink: InMemorySink) -> None:
+    import asyncio
+
+    state = {"active": 0, "max_active": 0}
+
+    async def handler(request):
+        state["active"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        await asyncio.sleep(0.01)
+        state["active"] -= 1
+        return json_response(200)
+
+    context, _ = _make(sink, handler)
+    summary = await execute_plan(
+        _plan([(i, f"用例{i}", _case_doc(_step(f"s{i}", f"步骤{i}"))) for i in range(6)]),
+        context,
+        mode="parallel",
+        concurrency=2,
+    )
+
+    assert state["max_active"] == 2  # 受并发上限约束,且确实并行了(不是串行)
+    assert summary.status == "success"
+    assert summary.total_steps == 6 and summary.passed == 6
+    # gather 保序:outcomes 按清单位置排列
+    assert [o.case_index for o in summary.cases] == list(range(6))
+
+
+async def test_parallel_stop_on_fail_lets_started_cases_finish(sink: InMemorySink) -> None:
+    import asyncio
+
+    async def handler(request):
+        # 失败用例耗时长(0.15):快用例 0.1 一个 —— 并发 2 下第二个名额
+        # 在 0.2 才轮到第 4 个用例,此时慢用例(0.15)已失败置停 → 只拦它
+        if "a1" in str(request.url):
+            await asyncio.sleep(0.15)
+        else:
+            await asyncio.sleep(0.1)
+        return json_response(200)
+
+    context, publisher = _make(sink, handler)
+    summary = await execute_plan(
+        _plan(
+            [
+                (11, "慢失败", _case_doc(_step("a1", "打开登录", expected=500))),
+                (12, "快一", _case_doc(_step("b1", "快一"))),
+                (13, "快二", _case_doc(_step("c1", "快二"))),
+                (14, "未开始", _case_doc(_step("d1", "未开始"))),
+            ]
+        ),
+        context,
+        stop_on_fail=True,
+        mode="parallel",
+        concurrency=2,
+    )
+
+    step_names = [dict(p)["step_name"] for e, p in publisher.events if e == "step.started"]
+    # 已开始的用例自然跑完(不强杀);未开始的只记归属不发事件
+    assert step_names == ["打开登录", "快一", "快二"]
+    assert [(o.case_index, o.status) for o in summary.cases] == [
+        (0, "failed"),
+        (1, "success"),
+        (2, "success"),
+        (3, "skipped"),
+    ]
+    assert summary.status == "failed"
+    assert summary.total_steps == 3 and summary.failed == 1 and summary.passed == 2
+
+
+async def test_parallel_progress_advances_to_total(sink: InMemorySink) -> None:
+    import asyncio
+
+    async def handler(request):
+        await asyncio.sleep(0.01)
+        return json_response(200)
+
+    context, publisher = _make(sink, handler)
+    summary = await execute_plan(
+        _plan(
+            [
+                (11, "A", _case_doc(_step("a1", "A1"), _step("a2", "A2"))),
+                (12, "B", _case_doc(_step("b1", "B1"))),
+            ]
+        ),
+        context,
+        mode="parallel",
+        concurrency=2,
+    )
+
+    progresses = [dict(p) for e, p in publisher.events if e == "run.progress"]
+    # 并行下进度仍推进到总数,completed 值两两不同(每步占一个唯一刻度)
+    assert len(progresses) == 3
+    completed = sorted(p["completed"] for p in progresses)
+    assert completed == [1, 2, 3]
+    assert all(p["total"] == 3 for p in progresses)
+
+
+async def test_cancel_wins_over_stop_on_fail(sink: InMemorySink) -> None:
+    cancellation = FlippableCancellation()
+
+    def handler(request):
+        return json_response(200)
+
+    context, publisher = _make(sink, handler, cancellation)
+    original = publisher.publish
+
+    def flip_after_first_step(event: str, payload: dict) -> None:
+        if event == "run.progress" and payload.get("completed") == 1:
+            cancellation.flag = True
+        original(event, payload)
+
+    publisher.publish = flip_after_first_step
+
+    summary = await execute_plan(
+        _plan(
+            [
+                (11, "A", _case_doc(_step("a1", "A1", expected=500))),
+                (12, "B", _case_doc(_step("b1", "B1"))),
+                (13, "C", _case_doc(_step("c1", "C1"))),
+            ]
+        ),
+        context,
+        stop_on_fail=True,
+    )
+
+    # 取消优先:状态是 stopped 而不是 failed;剩余用例全部跳过
+    assert summary.status == "stopped"
+    assert [(o.case_index, o.status) for o in summary.cases] == [
+        (0, "failed"),
+        (1, "skipped"),
+        (2, "skipped"),
+    ]

@@ -268,7 +268,13 @@ def execute_run(self, run_id: str) -> None:
                 if run.plan_id is not None:
                     summary = pool.submit(
                         asyncio.run,
-                        engine_execute_plan(plan_cases, context, stop_on_fail=plan.stop_on_fail),
+                        engine_execute_plan(
+                            plan_cases,
+                            context,
+                            stop_on_fail=plan.stop_on_fail,
+                            mode=plan.execute_mode,
+                            concurrency=plan.concurrency,
+                        ),
                     ).result()
                 else:
                     summary = pool.submit(asyncio.run, engine_execute(dsl, context)).result()

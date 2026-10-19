@@ -1,4 +1,4 @@
-"""计划执行器(#30):串行多用例编排。纯库 —— 不 import 框架/ORM/Redis。
+"""计划执行器(#30 串行、#32 并行)。纯库 —— 不 import 框架/ORM/Redis。
 
 输入 = 已解析的用例 DSL 列表(PlanCase)+ 既有 EngineContext(sink/
 publisher/cancellation 原样复用);输出 = 计划级 summary(用例级求和,
@@ -6,14 +6,17 @@ publisher/cancellation 原样复用);输出 = 计划级 summary(用例级求和,
 不记下来就「凭空消失」)。
 
 定案(spec #28):
-- 串行 = 严格按清单顺序逐用例执行;并行(asyncio.gather + Semaphore)
-  在 #32 接线,execute_mode 的拒绝在任务层。
+- 串行 = 严格按清单顺序逐用例执行;并行 = 单任务内 asyncio.gather +
+  Semaphore(plan.concurrency)(执行引擎 §8,不用 Celery 编排)。
 - step.* 事件带 case_index/case_name;run.progress 保持步骤级全计划
-  连续计数,不随用例切换重置。
+  连续计数 —— progress_base 用清单前置步数偏移,并行下每步占唯一刻度,
+  不随用例切换重置、不产生重复值。
 - stop_on_fail / 取消:未开始的用例只记 outcome,不发步骤事件 ——
-  跳过没有「开始」。
+  跳过没有「开始」;并行下已开始的用例自然跑完,不强杀;取消优先于
+  失败即停(状态落 stopped)。
 """
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -66,69 +69,84 @@ async def execute_plan(
     context: EngineContext,
     *,
     stop_on_fail: bool = False,
+    mode: str = "serial",
+    concurrency: int = 1,
 ) -> PlanSummary:
     total_steps = sum(len(c.dsl.steps) for c in cases)
-    outcomes: list[CaseOutcome] = []
-    sums = {"total": 0, "passed": 0, "failed": 0, "error": 0, "skipped": 0}
-    cancelled = False
+    # 每个用例的进度刻度偏移 = 清单里排在前面的用例步数之和:
+    # 并行下各步的 completed 值唯一,合流后仍是 1..total 的连续推进
+    offsets = [0] * len(cases)
+    for i in range(1, len(cases)):
+        offsets[i] = offsets[i - 1] + len(cases[i - 1].dsl.steps)
+
+    # 跨用例共享的两面旗:asyncio 单线程,赋值即同步,无需加锁
     stop = False
+    cancelled = False
 
     start = time.perf_counter()
-    for case_index, case in enumerate(cases):
+
+    async def run_one(case_index: int, case: PlanCase) -> CaseOutcome:
+        nonlocal stop, cancelled
+        # 用例边界检查:并行下只拦「还没拿到并发名额」的用例,
+        # 已开始的用例自然跑完,不强杀
         if context.cancellation.cancelled():
             cancelled = True
-        if cancelled:
-            outcomes.append(_skipped_outcome(case, case_index))
-            continue
-        if stop:
-            outcomes.append(_skipped_outcome(case, case_index))
-            continue
+        if cancelled or stop:
+            return _skipped_outcome(case, case_index)
 
         summary = await execute(
             case.dsl,
             context,
             case_ref=CaseRef(case_index=case_index, case_id=case.case_id, case_name=case.case_name),
-            progress_base=sums["total"],
+            progress_base=offsets[case_index],
             progress_total=total_steps,
-        )
-        sums["total"] += summary.total_steps
-        sums["passed"] += summary.passed
-        sums["failed"] += summary.failed
-        sums["error"] += summary.errored
-        sums["skipped"] += summary.skipped
-        outcomes.append(
-            CaseOutcome(
-                case_index=case_index,
-                case_id=case.case_id,
-                case_name=case.case_name,
-                status=summary.status,
-                total_steps=summary.total_steps,
-                passed=summary.passed,
-                failed=summary.failed,
-                errored=summary.errored,
-                skipped=summary.skipped,
-            )
         )
         if stop_on_fail and summary.status in ("failed", "error"):
             stop = True
+        return CaseOutcome(
+            case_index=case_index,
+            case_id=case.case_id,
+            case_name=case.case_name,
+            status=summary.status,
+            total_steps=summary.total_steps,
+            passed=summary.passed,
+            failed=summary.failed,
+            errored=summary.errored,
+            skipped=summary.skipped,
+        )
+
+    if mode == "parallel" and len(cases) > 1:
+        # 用例级并行受 Semaphore 约束(执行引擎 §8):单任务内 gather,
+        # 不引入 Celery 编排;outcomes 按 gather 保序 = 清单位置
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+
+        async def bounded(index: int, case: PlanCase) -> CaseOutcome:
+            async with semaphore:
+                return await run_one(index, case)
+
+        outcomes = list(await asyncio.gather(*(bounded(i, c) for i, c in enumerate(cases))))
+    else:
+        outcomes = []
+        for case_index, case in enumerate(cases):
+            outcomes.append(await run_one(case_index, case))
 
     duration_ms = (time.perf_counter() - start) * 1000
     if cancelled:
         status: RunStatus = "stopped"
-    elif sums["error"]:
+    elif any(o.status == "error" for o in outcomes):
         status = "error"
-    elif sums["failed"]:
+    elif any(o.status == "failed" for o in outcomes):
         status = "failed"
     else:
         status = "success"
 
     return PlanSummary(
         status=status,
-        total_steps=sums["total"],
-        passed=sums["passed"],
-        failed=sums["failed"],
-        errored=sums["error"],
-        skipped=sums["skipped"],
+        total_steps=sum(o.total_steps for o in outcomes),
+        passed=sum(o.passed for o in outcomes),
+        failed=sum(o.failed for o in outcomes),
+        errored=sum(o.errored for o in outcomes),
+        skipped=sum(o.skipped for o in outcomes),
         duration_ms=duration_ms,
         cases=outcomes,
     )

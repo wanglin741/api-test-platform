@@ -1,7 +1,9 @@
-"""计划执行端到端(#30):真实 PG + Redis + eager Celery。
+"""计划执行端到端(#30 串行、#32 并行):真实 PG + Redis + eager Celery。
 
 覆盖:串行端到端(明细带用例归属、summary 求和)、触发校验、取消到终态、
-SSE 快照/重放带用例维度;单用例执行的既有行为不变(由既有用例钉住)。
+并行端到端与失败即停接线、SSE 快照/重放带用例维度;单用例执行的既有行为
+不变(由既有用例钉住)。并行用例的真实并发上限由引擎单测钉住 —— 集成层
+钉的是「任务层把 execute_mode/concurrency 传进引擎」。
 """
 
 import json
@@ -161,7 +163,7 @@ async def test_trigger_plan_validates_plan_and_items(client, local_server):
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "plan_not_found"
 
-    # 并行计划本工单未支持 → 422(#32 接线)
+    # 并行计划不再被 422 拒绝(#32 接线):直接触发成功
     parallel = await _setup_plan(
         client,
         local_server,
@@ -170,8 +172,8 @@ async def test_trigger_plan_validates_plan_and_items(client, local_server):
         concurrency=2,
     )
     resp = await _trigger(client, parallel)
-    assert resp.status_code == 422
-    assert resp.json()["error"]["code"] == "plan_mode_unsupported"
+    assert resp.status_code == 202, resp.text
+    assert (await client.get(f"/api/v1/runs/{resp.json()['run_id']}")).json()["status"] == "success"
 
     # 计划无默认环境且请求未带 → 422
     plan = (
@@ -246,6 +248,100 @@ async def test_cancel_flag_skips_remaining_cases_to_stopped(client, local_server
     ]
     steps = (await client.get(f"/api/v1/runs/{run_id}/steps")).json()
     assert steps["count"] == 0
+
+
+# ---------- 并行(#32)----------
+
+
+async def test_parallel_plan_run_end_to_end(client, local_server):
+    setup = await _setup_plan(
+        client,
+        local_server,
+        [("登录", [_step("a1", "打开登录")]), ("下单", [_step("b1", "下单")]), ("支付", [_step("c1", "支付")])],
+        execute_mode="parallel",
+        concurrency=2,
+    )
+    resp = await _trigger(client, setup)
+    assert resp.status_code == 202, resp.text
+    run_id = resp.json()["run_id"]
+
+    run = (await client.get(f"/api/v1/runs/{run_id}")).json()
+    assert run["status"] == "success"
+    summary = run["summary"]
+    assert summary["total"] == 3 and summary["passed"] == 3
+    # gather 保序:cases 按清单位置排列
+    assert [(c["case_index"], c["status"]) for c in summary["cases"]] == [
+        (0, "success"),
+        (1, "success"),
+        (2, "success"),
+    ]
+    steps = (await client.get(f"/api/v1/runs/{run_id}/steps")).json()["items"]
+    assert [s["case_index"] for s in steps] == [0, 1, 2]
+
+
+async def test_parallel_stop_on_fail_skips_unstarted(client, local_server):
+    # 并发 1 的并行路径(gather + Semaphore(1))等价串行:失败次序确定,
+    # 集成层钉住「任务层把 mode/concurrency 传进引擎」的接线
+    setup = await _setup_plan(
+        client,
+        local_server,
+        [
+            ("登录", [_step("a1", "打开登录", expected=500)]),
+            ("下单", [_step("b1", "下单")]),
+            ("支付", [_step("c1", "支付")]),
+        ],
+        execute_mode="parallel",
+        concurrency=1,
+        stop_on_fail=True,
+    )
+    resp = await _trigger(client, setup)
+    run_id = resp.json()["run_id"]
+
+    run = (await client.get(f"/api/v1/runs/{run_id}")).json()
+    assert run["status"] == "failed"
+    assert [(c["case_index"], c["status"]) for c in run["summary"]["cases"]] == [
+        (0, "failed"),
+        (1, "skipped"),
+        (2, "skipped"),
+    ]
+    steps = (await client.get(f"/api/v1/runs/{run_id}/steps")).json()["items"]
+    assert [s["case_index"] for s in steps] == [0]
+
+
+async def test_parallel_cancel_wins_over_stop_on_fail(client, local_server):
+    from app.tasks.celery_app import celery_app
+    from app.tasks.engine_tasks import execute_run
+
+    setup = await _setup_plan(
+        client,
+        local_server,
+        [("登录", [_step("a1", "打开登录")]), ("下单", [_step("b1", "下单")])],
+        execute_mode="parallel",
+        concurrency=2,
+        stop_on_fail=True,
+    )
+
+    celery_app.conf.task_always_eager = False
+    try:
+        resp = await _trigger(client, setup)
+    finally:
+        celery_app.conf.task_always_eager = True
+    run_id = resp.json()["run_id"]
+
+    import redis as redis_py
+
+    from app.core.config import get_settings
+
+    redis_py.Redis.from_url(get_settings().redis_url).set(f"run:cancel:{run_id}", 1, ex=3600)
+    execute_run.apply(args=[run_id])
+
+    run = (await client.get(f"/api/v1/runs/{run_id}")).json()
+    # 取消优先于失败即停:状态是 stopped 而不是 failed
+    assert run["status"] == "stopped"
+    assert [(c["case_index"], c["status"]) for c in run["summary"]["cases"]] == [
+        (0, "skipped"),
+        (1, "skipped"),
+    ]
 
 
 # ---------- SSE 事件流带用例维度 ----------

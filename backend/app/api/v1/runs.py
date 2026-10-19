@@ -124,13 +124,6 @@ async def trigger_run(
         plan = await session.get(TestPlan, payload.plan_id)
         if plan is None or plan.deleted_at is not None or plan.project_id != project_id:
             raise not_found("plan", payload.plan_id)
-        if plan.execute_mode == "parallel":
-            # 并行执行在 #32 接线;先明确拒绝,不静默降级串行
-            raise ValidationFailedError(
-                "并行计划执行尚未开放",
-                code="plan_mode_unsupported",
-                details={"plan_id": plan.id, "execute_mode": plan.execute_mode},
-            )
         item_count = await session.scalar(
             select(func.count()).select_from(TestPlanItem).where(TestPlanItem.plan_id == plan.id)
         )

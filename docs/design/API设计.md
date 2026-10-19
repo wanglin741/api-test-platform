@@ -248,7 +248,7 @@ audit-logs
 
 `plan_id` 与 `case_id` 二选一(单用例调试执行走 `/cases/{cid}/debug`,但 CI 场景下用同一个端点更方便)。两者同给或同缺 → 422 `run_target_invalid`。
 
-计划触发时:`environment_id` 覆盖计划的默认环境,两者都缺 → 422 `environment_required`;并行计划暂未开放(422 `plan_mode_unsupported`);清单为空 → 422 `plan_items_empty`。单用例触发必须带 `environment_id`。
+计划触发时:`environment_id` 覆盖计划的默认环境,两者都缺 → 422 `environment_required`;清单为空 → 422 `plan_items_empty`。单用例触发必须带 `environment_id`。
 
 响应 **202 Accepted**:
 
