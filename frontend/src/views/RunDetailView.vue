@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowRight } from '@element-plus/icons-vue'
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { api } from '@/api/client'
@@ -84,14 +84,42 @@ const durationText = () => {
 }
 
 // 快照明细按步骤展开/收起(前端设计 §6.2:先扫统计,再对失败步骤逐个看现场)
-// key 用 step_index:运行期事件合成行与终态数据库行切换时 key 稳定,展开态不丢
-const expanded = ref<Set<number>>(new Set())
+// key 用「用例序号-步骤序号」复合:计划执行里 step_index 跨用例重复,
+// 单用例执行 case_index 恒 0,两种模式 key 都稳定,展开态不丢
+const expanded = ref<Set<string>>(new Set())
+
+function stepKey(step: StepOut): string {
+  return `${step.case_index ?? 0}-${step.step_index}`
+}
 
 function toggleStep(step: StepOut): void {
+  const key = stepKey(step)
   const next = new Set(expanded.value)
-  if (next.has(step.step_index)) next.delete(step.step_index)
-  else next.add(step.step_index)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
   expanded.value = next
+}
+
+// ── 分组渲染(前端设计 §6.3):计划执行按用例分组,单用例平铺 ──────────
+// 平铺模式包一层无组头的伪组,行渲染只有一份标记
+const displayGroups = computed(() => {
+  const groups = runStore.caseGroups
+  if (groups !== null) return groups.map((g) => ({ ...g, showHeader: true }))
+  return [
+    {
+      caseIndex: 0,
+      caseName: '',
+      status: runStore.run?.status ?? '',
+      steps: runStore.steps,
+      showHeader: false,
+    },
+  ]
+})
+
+function groupAssertion(steps: StepOut[]): string {
+  const total = steps.reduce((sum, s) => sum + s.assertion_total, 0)
+  const passed = steps.reduce((sum, s) => sum + s.assertion_passed, 0)
+  return `断言 ${passed}/${total}`
 }
 </script>
 
@@ -144,9 +172,9 @@ function toggleStep(step: StepOut): void {
     </div>
 
     <div class="meta-line">
-      用例 #{{ runStore.run.case_id }}(v{{ runStore.run.case_version }})· 环境 #{{
-        runStore.run.environment_id
-      }}
+      <template v-if="runStore.run.plan_id != null">计划 #{{ runStore.run.plan_id }}</template>
+      <template v-else>用例 #{{ runStore.run.case_id }}(v{{ runStore.run.case_version }})</template>
+      · 环境 #{{ runStore.run.environment_id }}
       · {{ runStore.run.trigger_mode }} · {{ runStore.run.created_at }}
     </div>
 
@@ -170,45 +198,59 @@ function toggleStep(step: StepOut): void {
         <span class="live-text">
           {{
             runStore.runningStep
-              ? `正在执行第 ${runStore.runningStep.stepIndex + 1} 步:${runStore.runningStep.stepName}`
+              ? runStore.runningStep.caseName !== undefined
+                ? `正在执行「${runStore.runningStep.caseName}」第 ${runStore.runningStep.stepIndex + 1} 步:${runStore.runningStep.stepName}`
+                : `正在执行第 ${runStore.runningStep.stepIndex + 1} 步:${runStore.runningStep.stepName}`
               : `${runStore.progress?.completed ?? 0}/${runStore.progress?.total ?? 0} 已完成`
           }}
         </span>
       </div>
-      <div
-        v-for="step in runStore.steps"
-        :key="step.step_index"
-        class="step-row"
-        :class="{ 'is-bad': step.status === 'failed' || step.status === 'error' }"
-      >
-        <div class="row-head" @click="toggleStep(step)">
-          <el-icon class="chevron" :class="{ open: expanded.has(step.step_index) }">
-            <ArrowRight />
-          </el-icon>
-          <el-tag :type="statusTag(step.status)" size="small">{{ step.status }}</el-tag>
-          <span class="step-name">{{ step.step_index + 1 }}. {{ step.step_name }}</span>
-          <span class="assertion-count"
-            >断言 {{ step.assertion_passed }}/{{ step.assertion_total }}</span
-          >
-          <span class="duration">{{ step.duration_ms }}ms</span>
+      <template v-for="group in displayGroups" :key="group.caseIndex">
+        <!-- 计划执行组头:用例名 + 状态 + 组内断言数;被跳用例无行,组头仍展示 -->
+        <div
+          v-if="group.showHeader"
+          class="case-head"
+          :class="{ 'is-bad': group.status === 'failed' || group.status === 'error' }"
+        >
+          <el-tag :type="statusTag(group.status)" size="small">{{ group.status }}</el-tag>
+          <span class="case-name">{{ group.caseName }}</span>
+          <span class="assertion-count">{{ groupAssertion(group.steps) }}</span>
         </div>
+        <div
+          v-for="step in group.steps"
+          :key="stepKey(step)"
+          class="step-row"
+          :class="{ 'is-bad': step.status === 'failed' || step.status === 'error' }"
+        >
+          <div class="row-head" @click="toggleStep(step)">
+            <el-icon class="chevron" :class="{ open: expanded.has(stepKey(step)) }">
+              <ArrowRight />
+            </el-icon>
+            <el-tag :type="statusTag(step.status)" size="small">{{ step.status }}</el-tag>
+            <span class="step-name">{{ step.step_index + 1 }}. {{ step.step_name }}</span>
+            <span class="assertion-count"
+              >断言 {{ step.assertion_passed }}/{{ step.assertion_total }}</span
+            >
+            <span class="duration">{{ step.duration_ms }}ms</span>
+          </div>
 
-        <div v-if="expanded.has(step.step_index)" class="step-detail">
-          <el-alert
-            v-if="step.error_message"
-            class="row-error"
-            type="warning"
-            :closable="false"
-            :title="step.error_message"
-          />
-          <StepSnapshot
-            :request="step.request ?? null"
-            :response="step.response ?? null"
-            :assertions="assertionRows(step)"
-            :extracted="step.extracted_variables"
-          />
+          <div v-if="expanded.has(stepKey(step))" class="step-detail">
+            <el-alert
+              v-if="step.error_message"
+              class="row-error"
+              type="warning"
+              :closable="false"
+              :title="step.error_message"
+            />
+            <StepSnapshot
+              :request="step.request ?? null"
+              :response="step.response ?? null"
+              :assertions="assertionRows(step)"
+              :extracted="step.extracted_variables"
+            />
+          </div>
         </div>
-      </div>
+      </template>
       <div v-if="!runStore.steps.length" class="none">暂无步骤明细</div>
     </div>
   </div>
@@ -281,6 +323,26 @@ function toggleStep(step: StepOut): void {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+/* 计划报告的用例组头:细字号一行,失败/出错组语义色突出 */
+.case-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 6px 4px;
+}
+
+.case-head.is-bad {
+  box-shadow: inset 3px 0 0 var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  padding-left: 8px;
+}
+
+.case-head .case-name {
+  font-weight: 600;
+  font-size: 13px;
 }
 
 .live-line {

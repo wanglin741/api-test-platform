@@ -8,10 +8,11 @@ import { useProjectStore } from '@/stores/project'
 
 import PlanDetailView from './PlanDetailView.vue'
 
-const { get, patch, put, push } = vi.hoisted(() => ({
+const { get, patch, put, post, push } = vi.hoisted(() => ({
   get: vi.fn(),
   patch: vi.fn(),
   put: vi.fn(),
+  post: vi.fn(),
   push: vi.fn(),
 }))
 
@@ -22,7 +23,7 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@/api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/client')>()
-  return { ...actual, api: { GET: get, PATCH: patch, PUT: put } as unknown as ApiClient }
+  return { ...actual, api: { GET: get, PATCH: patch, PUT: put, POST: post } as unknown as ApiClient }
 })
 
 function okResponse(body: unknown) {
@@ -49,13 +50,13 @@ const ENV_DEV = { id: 3, name: 'dev' }
 const CASE_LOGIN = { id: 101, name: '登录' }
 const CASE_ORDER = { id: 102, name: '下单' }
 
-function mockGets({ items = [ITEM_LOGIN] as object[] } = {}) {
+function mockGets({ items = [ITEM_LOGIN] as object[], plan = PLAN as object } = {}) {
   get.mockImplementation(async (path: unknown) => {
     const url = String(path)
     if (url.includes('/items')) return okResponse(items)
     if (url.includes('/environments')) return okResponse([ENV_DEV])
     if (url.includes('/cases')) return okResponse({ items: [CASE_LOGIN, CASE_ORDER], total: 2 })
-    return okResponse(PLAN)
+    return okResponse(plan)
   })
 }
 
@@ -118,5 +119,39 @@ describe('PlanDetailView', () => {
     await flushPromises()
     const [, opts2] = put.mock.calls[0] as [string, { body: { items: { case_id: number }[] } }]
     expect(opts2.body.items).toEqual([{ case_id: 102 }])
+  })
+})
+
+describe('PlanDetailView 触发动线(#31)', () => {
+  const PLAN_WITH_ENV = { ...PLAN, environment_id: 3 }
+
+  it('弹窗环境默认取计划配置;确认后 POST 计划触发并跳转报告', async () => {
+    mockGets({ plan: PLAN_WITH_ENV })
+    post.mockResolvedValue(okResponse({ run_id: 'r-9', status: 'pending' }))
+    setActivePinia(createPinia())
+    useProjectStore().currentId = 1
+    // el-select 在 jsdom 的弹窗里会触发递归更新(弹层定位依赖真实布局):
+    // 弹层组件一律打桩,断言走 POST 出参,不测弹窗内交互
+    const wrapper = mount(PlanDetailView, {
+      global: {
+        plugins: [ElementPlus],
+        stubs: { teleport: true, 'el-select': true, 'el-option': true },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.find('.bar .el-button--primary').trigger('click')
+    await flushPromises()
+
+    const dialog = wrapper.find('.el-dialog')
+    expect(dialog.exists()).toBe(true)
+
+    await dialog.find('.el-dialog__footer .el-button--primary').trigger('click')
+    await flushPromises()
+
+    const [path, opts] = post.mock.calls[0] as [string, { body: unknown }]
+    expect(path).toBe('/api/v1/projects/{project_id}/runs')
+    expect(opts.body).toEqual({ plan_id: 1, environment_id: 3 })
+    expect(push).toHaveBeenCalledWith('/runs/r-9')
   })
 })

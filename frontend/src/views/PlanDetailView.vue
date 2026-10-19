@@ -8,6 +8,7 @@ import draggable from 'vuedraggable'
 import { api } from '@/api/client'
 import { usePlanStore } from '@/stores/plan'
 import { useProjectStore } from '@/stores/project'
+import { useRunStore } from '@/stores/run'
 
 const route = useRoute()
 const router = useRouter()
@@ -99,6 +100,38 @@ async function removePlan() {
   void router.push('/plans')
 }
 
+// ── 触发动线(前端设计 §6.4):弹窗选环境(默认计划配置),成功跳报告 ──
+const runStore = useRunStore()
+const triggerDialog = ref(false)
+const triggerEnvId = ref<number | null>(null)
+const triggering = ref(false)
+
+function openTrigger() {
+  triggerEnvId.value = form.value.environment_id
+  triggerDialog.value = true
+}
+
+async function confirmTrigger() {
+  if (currentId.value === null) return
+  if (triggerEnvId.value === null) {
+    ElMessage.warning('请选择执行环境')
+    return
+  }
+  triggering.value = true
+  try {
+    const runId = await runStore.triggerPlan(currentId.value, planId.value, triggerEnvId.value)
+    if (runId !== null) {
+      runStore.rememberEnv(currentId.value, triggerEnvId.value)
+      triggerDialog.value = false
+      void router.push(`/runs/${runId}`)
+    }
+  } catch {
+    // 错误已由全局拦截器弹出(如清单为空 / 并行未支持)
+  } finally {
+    triggering.value = false
+  }
+}
+
 // ── 用例清单编排:左池右列,右列拖拽排序 ─────────────────────────
 type CaseRow = { id: number; name: string }
 const cases = ref<CaseRow[]>([])
@@ -156,8 +189,34 @@ onMounted(async () => {
       <el-button @click="router.push('/plans')">返回列表</el-button>
       <h3 class="title">{{ current.name }}</h3>
       <span class="spacer" />
+      <el-button type="primary" @click="openTrigger">触发执行</el-button>
       <el-button type="danger" plain @click="removePlan">删除计划</el-button>
     </div>
+
+    <el-dialog v-model="triggerDialog" title="触发执行" width="420px">
+      <el-form label-width="90px">
+        <el-form-item label="环境" required>
+          <el-select v-model="triggerEnvId" placeholder="选择执行环境" class="env-select">
+            <el-option
+              v-for="env in environments"
+              :key="env.id"
+              :label="env.name"
+              :value="env.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="执行方式">
+          <span>
+            {{ current.execute_mode === 'parallel' ? '并行' : '串行' }} · 共
+            {{ planItems.length }} 条用例
+          </span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="triggerDialog = false">取消</el-button>
+        <el-button type="primary" :loading="triggering" @click="confirmTrigger">触发执行</el-button>
+      </template>
+    </el-dialog>
 
     <el-card header="执行配置" class="config-card">
       <el-form label-width="110px">

@@ -215,3 +215,115 @@ describe('RunDetailView', () => {
     expect(wrapper.find('.truncated').exists()).toBe(true)
   })
 })
+
+describe('RunDetailView 计划分组(#31)', () => {
+  const PLAN_RUN = {
+    ...RUN,
+    run_id: 'r-plan',
+    case_id: null,
+    case_version: null,
+    plan_id: 12,
+    summary: {
+      ...RUN.summary,
+      cases: [
+        {
+          case_index: 0,
+          case_id: 11,
+          case_name: '登录',
+          status: 'failed',
+          total: 1,
+          passed: 0,
+          failed: 1,
+          error: 0,
+          skipped: 0,
+        },
+        {
+          case_index: 1,
+          case_id: 12,
+          case_name: '下单',
+          status: 'skipped',
+          total: 0,
+          passed: 0,
+          failed: 0,
+          error: 0,
+          skipped: 0,
+        },
+      ],
+    },
+  }
+
+  function planStep(caseIndex: number, caseId: number, name: string, status: string) {
+    return {
+      id: caseIndex * 10 + 1,
+      step_index: 0,
+      step_name: name,
+      step_type: 'http',
+      status,
+      duration_ms: 30,
+      case_index: caseIndex,
+      case_id: caseId,
+      request: { method: 'POST', url: `http://dev/${name}`, headers: {}, body: null },
+      response: { status_code: 200, headers: {}, body: '{}', size: 2, truncated: false },
+      extracted_variables: {},
+      assertions: [{ type: 'status', operator: 'eq', expected: 200, actual: 200, passed: true }],
+      assertion_total: 1,
+      assertion_passed: 1,
+      error_message: null,
+    }
+  }
+
+  it('计划报告:按用例分组,组头 = 用例名 + 状态 + 组内断言数;失败组突出', async () => {
+    mockRun(
+      PLAN_RUN,
+      {
+        items: [planStep(0, 11, '登录步骤', 'failed'), planStep(1, 12, '下单步骤', 'passed')],
+        count: 2,
+        truncated: false,
+      },
+    )
+    const wrapper = await mountView()
+
+    const heads = wrapper.findAll('.case-head')
+    expect(heads).toHaveLength(2)
+    expect(heads[0]?.text()).toContain('登录')
+    expect(heads[0]?.text()).toContain('failed')
+    expect(heads[0]?.classes()).toContain('is-bad')
+    // 被跳用例没有步骤行,组头仍展示(否则凭空消失)
+    expect(heads[1]?.text()).toContain('下单')
+    expect(heads[1]?.text()).toContain('skipped')
+    expect(heads[1]?.classes()).not.toContain('is-bad')
+
+    // 组内复用既有步骤行,可展开快照
+    const rows = wrapper.findAll('.step-row')
+    expect(rows).toHaveLength(2)
+    await rows[0]!.find('.row-head').trigger('click')
+    expect(rows[0]!.find('.step-detail').text()).toContain('http://dev/登录步骤')
+  })
+
+  it('计划运行中:「正在执行」文案带用例名', async () => {
+    mockRun({ ...PLAN_RUN, status: 'running', summary: null }, { items: [], count: 0, truncated: false })
+    const wrapper = await mountView()
+    const { useRunStore } = await import('@/stores/run')
+    const store = useRunStore()
+
+    store.progress = { completed: 1, total: 3 }
+    store.runningStep = {
+      stepIndex: 1,
+      stepName: '提交订单',
+      stepType: 'http',
+      caseIndex: 1,
+      caseName: '下单',
+    }
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('.live-text').text()).toContain('正在执行「下单」第 2 步:提交订单')
+  })
+
+  it('单用例报告:无组头,平铺渲染与改造前一致', async () => {
+    mockRun(RUN, STEPS)
+    const wrapper = await mountView()
+
+    expect(wrapper.findAll('.case-head')).toHaveLength(0)
+    expect(wrapper.findAll('.step-row')).toHaveLength(2)
+  })
+})

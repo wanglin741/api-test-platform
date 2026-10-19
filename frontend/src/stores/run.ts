@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 
 import { api } from '@/api/client'
 
@@ -8,6 +8,27 @@ import type { components } from '@/api/schema'
 
 type RunOut = components['schemas']['RunOut']
 type StepOut = components['schemas']['StepOut']
+
+/** 计划报告的用例分组行:组头展示用例名 + 状态,组内是既有步骤行。 */
+export interface CaseGroupView {
+  caseIndex: number
+  caseName: string
+  status: string
+  steps: StepOut[]
+}
+
+/** run.summary.cases 的一行(数据模型 §run.summary,计划执行附加)。 */
+interface PlanCaseSummary {
+  case_index: number
+  case_id: number | null
+  case_name: string
+  status: string
+  total: number
+  passed: number
+  failed: number
+  error: number
+  skipped: number
+}
 
 /** 与后端 RUN_TERMINAL_STATUSES 一致;轮询见到这些状态就停。 */
 export const TERMINAL_STATUSES = new Set(['success', 'failed', 'error', 'stopped'])
@@ -66,6 +87,20 @@ export const useRunStore = defineStore('run', () => {
     return data?.run_id ?? null
   }
 
+  /** 计划触发动线(前端设计 §6.4):弹窗选环境后从计划详情页一键触发。 */
+  async function triggerPlan(
+    projectId: number,
+    planId: number,
+    environmentId: number,
+    client: ApiClient = api,
+  ): Promise<string | null> {
+    const { data } = await client.POST('/api/v1/projects/{project_id}/runs', {
+      params: { path: { project_id: projectId } },
+      body: { plan_id: planId, environment_id: environmentId },
+    })
+    return data?.run_id ?? null
+  }
+
   async function fetchRun(runId: string, client: ApiClient = api) {
     const { data } = await client.GET('/api/v1/runs/{run_id}', {
       params: { path: { run_id: runId } },
@@ -108,6 +143,7 @@ export const useRunStore = defineStore('run', () => {
     stepsTruncated.value = false
     progress.value = null
     runningStep.value = null
+    caseNames.value = new Map()
   }
 
   let timer: ReturnType<typeof setInterval> | null = null
@@ -115,6 +151,45 @@ export const useRunStore = defineStore('run', () => {
   // 报告代数:reset/startStream 各自递增;所有远端写回(loadRun/loadSteps)
   // 在 await 恢复点校验,迟到的旧响应不能覆盖当前打开的报告
   let epoch = 0
+
+  /** 计划报告的用例分组视图(前端设计 §6.3)。单用例执行返回 null ——
+   * 组件渲染平铺列表,与改造前一致。
+   *
+   * 两个数据来源:终态 summary.cases 是权威名单(含被跳用例 —— 它们没有
+   * 步骤行,不记组就「凭空消失」);运行期 summary 未落库,从步骤行聚合,
+   * 用例名取 step 事件携带的 case_name。 */
+  const caseGroups = computed<CaseGroupView[] | null>(() => {
+    const current = run.value
+    if (current === null || current.plan_id === null || current.plan_id === undefined) return null
+    const summaryCases = (current.summary as { cases?: PlanCaseSummary[] } | null | undefined)
+      ?.cases
+    if (Array.isArray(summaryCases) && summaryCases.length > 0) {
+      return summaryCases.map((c) => ({
+        caseIndex: c.case_index,
+        caseName: c.case_name,
+        status: c.status,
+        steps: steps.value.filter((s) => (s.case_index ?? 0) === c.case_index),
+      }))
+    }
+    const groups: CaseGroupView[] = []
+    const byIndex = new Map<number, CaseGroupView>()
+    for (const s of steps.value) {
+      const ci = s.case_index ?? 0
+      let group = byIndex.get(ci)
+      if (group === undefined) {
+        group = {
+          caseIndex: ci,
+          caseName: caseNames.value.get(ci) ?? `用例 #${s.case_id ?? ci}`,
+          status: 'running',
+          steps: [],
+        }
+        byIndex.set(ci, group)
+        groups.push(group)
+      }
+      group.steps.push(s)
+    }
+    return groups
+  })
 
   async function pollOnce(runId: string, client: ApiClient): Promise<void> {
     // 单次轮询失败(网络抖动)不终止轮询:吞掉,下一跳自愈
@@ -159,7 +234,17 @@ export const useRunStore = defineStore('run', () => {
   // 运行期状态:进度(已完成/总数)与正在执行的步骤 —— 只由事件驱动,
   // 统计卡仍只由汇总数据驱动(不从步骤事件合成)
   const progress = ref<{ completed: number; total: number } | null>(null)
-  const runningStep = ref<{ stepIndex: number; stepName: string; stepType: string } | null>(null)
+  const runningStep = ref<{
+    stepIndex: number
+    stepName: string
+    stepType: string
+    /** 计划执行的用例归属;单用例执行不带 */
+    caseIndex?: number
+    caseName?: string
+  } | null>(null)
+  // 计划执行的用例名(按 case_index 记,来自 step 事件):运行期分组展示用;
+  // 终态由 summary.cases 提供权威名单(含被跳用例)
+  const caseNames = ref<Map<number, string>>(new Map())
   let source: StreamSource | null = null
   let streamHandlers: Array<[string, EventListener]> = []
   // 当前订阅的 run(null = 无活跃订阅)。await 恢复点与事件回调都校验它:
@@ -201,19 +286,26 @@ export const useRunStore = defineStore('run', () => {
     /** 计划执行的用例归属(#30):单用例事件不带,行取缺省 0 */
     case_index?: number
     case_id?: number | null
+    case_name?: string
   }): void {
-    const idx = steps.value.findIndex((s) => s.step_index === payload.step_index)
+    const caseIndex = payload.case_index ?? 0
+    if (payload.case_name !== undefined) caseNames.value.set(caseIndex, payload.case_name)
+    // 行 key 是 (用例序号, 步骤序号) 复合:计划执行里 step_index 跨用例重复,
+    // 单用例执行 case_index 恒 0,两种模式统一
+    const idx = steps.value.findIndex(
+      (s) => (s.case_index ?? 0) === caseIndex && s.step_index === payload.step_index,
+    )
     const prev = idx >= 0 ? steps.value[idx] : undefined
     const row: StepOut = {
-      // 负数哨兵 id:行 key 是 step_index,id 只需不与真实行冲突
-      id: prev?.id ?? -(payload.step_index + 1),
+      // 负数哨兵 id:key 是复合键,id 只需不与真实行冲突
+      id: prev?.id ?? -(caseIndex * 100000 + payload.step_index + 1),
       step_index: payload.step_index,
       step_name: payload.step_name,
       // 跳过的步骤没有 step.started:类型以事件载荷为准(引擎随 finished 下发)
       step_type: payload.step_type ?? runningStep.value?.stepType ?? prev?.step_type ?? 'http',
       status: payload.status,
       duration_ms: payload.duration_ms ?? 0,
-      case_index: payload.case_index ?? prev?.case_index ?? 0,
+      case_index: caseIndex,
       case_id: payload.case_id ?? prev?.case_id ?? null,
       request: prev?.request ?? null,
       response: prev?.response ?? null,
@@ -298,13 +390,22 @@ export const useRunStore = defineStore('run', () => {
     }
     const onStepStarted = (e: MessageEvent) => {
       if (streamRunId !== runId) return
-      const payload: { step_index: number; step_name: string; step_type: string } = JSON.parse(
-        e.data,
-      )
+      const payload: {
+        step_index: number
+        step_name: string
+        step_type: string
+        case_index?: number
+        case_name?: string
+      } = JSON.parse(e.data)
+      if (payload.case_index !== undefined && payload.case_name !== undefined) {
+        caseNames.value.set(payload.case_index, payload.case_name)
+      }
       runningStep.value = {
         stepIndex: payload.step_index,
         stepName: payload.step_name,
         stepType: payload.step_type,
+        caseIndex: payload.case_index,
+        caseName: payload.case_name,
       }
     }
     const onStepFinished = (e: MessageEvent) => {
@@ -384,11 +485,13 @@ export const useRunStore = defineStore('run', () => {
     streaming,
     progress,
     runningStep,
+    caseGroups,
     runItems,
     nextCursor,
     listLoading,
     listRuns,
     trigger,
+    triggerPlan,
     loadRun,
     loadSteps,
     refresh,

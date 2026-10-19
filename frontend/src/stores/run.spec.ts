@@ -698,3 +698,169 @@ describe('runStore.startStream', () => {
     expect(store.run).toBeNull() // 旧 run 的数据不落地
   })
 })
+
+describe('runStore.plan 模式(#31)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    localStorage.clear()
+    FakeEventSource.instances = []
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  const PLAN_RUN_RUNNING = {
+    ...RUN_RUNNING,
+    run_id: 'r-plan',
+    case_id: null,
+    case_version: null,
+    plan_id: 12,
+  }
+
+  function planStreamClient() {
+    return mockClient({
+      GET: vi.fn(async (path: unknown) =>
+        okResponse(
+          String(path).includes('/steps')
+            ? { items: [], count: 0, truncated: false }
+            : PLAN_RUN_RUNNING,
+        ),
+      ),
+    })
+  }
+
+  function streamClient() {
+    return mockClient({
+      GET: vi.fn(async (path: unknown) =>
+        okResponse(
+          String(path).includes('/steps') ? { items: [], count: 0, truncated: false } : RUN_RUNNING,
+        ),
+      ),
+    })
+  }
+
+  const stepPayload = (caseIndex: number, stepIndex: number, status = 'passed') => ({
+    step_index: stepIndex,
+    step_name: `s${stepIndex}`,
+    step_type: 'http',
+    status,
+    duration_ms: 10,
+    case_index: caseIndex,
+    case_name: caseIndex === 0 ? '登录' : '下单',
+    assertion_total: 1,
+    assertion_passed: status === 'passed' ? 1 : 0,
+  })
+
+  it('triggerPlan:POST plan_id + environment_id 返回 run_id', async () => {
+    setActivePinia(createPinia())
+    const client = mockClient({
+      POST: vi.fn(async () => okResponse({ run_id: 'r-plan', status: 'pending' })),
+    })
+
+    const runId = await useRunStore().triggerPlan(1, 12, 3, client)
+
+    expect(runId).toBe('r-plan')
+    const [path, opts] = (client.POST as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { body: unknown },
+    ]
+    expect(path).toBe('/api/v1/projects/{project_id}/runs')
+    expect(opts.body).toEqual({ plan_id: 12, environment_id: 3 })
+  })
+
+  it('step.finished 按 (case_index, step_index) 复合键幂等 upsert', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-plan', planStreamClient(), (url) => new FakeEventSource(url))
+
+    const source = FakeEventSource.instances[0]!
+    source.emit('run.started', { total_steps: 2, started_at: null })
+    // 两个用例各有 step_index 0:行 key 必须带上用例序号,否则互相覆盖
+    source.emit('step.finished', stepPayload(0, 0))
+    source.emit('step.finished', stepPayload(1, 0))
+    source.emit('step.finished', stepPayload(0, 0, 'failed')) // 重复投递:合并
+
+    expect(store.steps).toHaveLength(2)
+    expect(store.steps[0]!.case_index).toBe(0)
+    expect(store.steps[0]!.status).toBe('failed') // 摘要字段以事件为准
+    expect(store.steps[1]!.case_index).toBe(1)
+  })
+
+  it('单用例事件不带 case_index:行取缺省 0,与既有行为一致', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-1', streamClient(), (url) => new FakeEventSource(url))
+
+    const source = FakeEventSource.instances[0]!
+    source.emit('run.started', { total_steps: 1, started_at: null })
+    source.emit('step.finished', { ...stepPayload(0, 0), case_index: undefined, case_name: undefined })
+
+    expect(store.steps).toHaveLength(1)
+    expect(store.steps[0]!.case_index).toBe(0)
+    expect(store.caseGroups).toBeNull() // 单用例执行不分组
+  })
+
+  it('runningStep 带用例名;caseGroups 运行期从步骤行聚合', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-plan', planStreamClient(), (url) => new FakeEventSource(url))
+
+    const source = FakeEventSource.instances[0]!
+    source.emit('run.started', { total_steps: 2, started_at: null })
+    source.emit('step.started', {
+      step_index: 0,
+      step_name: '打开登录',
+      step_type: 'http',
+      case_index: 1,
+      case_name: '下单',
+    })
+    expect(store.runningStep?.caseName).toBe('下单')
+
+    source.emit('step.finished', stepPayload(1, 0))
+
+    const groups = store.caseGroups
+    expect(groups).not.toBeNull()
+    expect(groups).toHaveLength(1)
+    expect(groups![0]!.caseName).toBe('下单') // 用例名来自事件,不是猜的
+    expect(groups![0]!.steps).toHaveLength(1)
+  })
+
+  it('caseGroups 终态从 summary.cases 分组:被跳用例无步骤行也占组', async () => {
+    setActivePinia(createPinia())
+    const store = useRunStore()
+    await store.startStream('r-plan', planStreamClient(), (url) => new FakeEventSource(url))
+    store.run = {
+      ...PLAN_RUN_RUNNING,
+      status: 'failed',
+      summary: {
+        total: 1,
+        passed: 0,
+        failed: 1,
+        error: 0,
+        skipped: 0,
+        cases: [
+          { case_index: 0, case_id: 11, case_name: '登录', status: 'failed', total: 1, passed: 0, failed: 1, error: 0, skipped: 0 },
+          { case_index: 1, case_id: 12, case_name: '下单', status: 'skipped', total: 0, passed: 0, failed: 0, error: 0, skipped: 0 },
+        ],
+      },
+    }
+    store.steps = [
+      {
+        id: 1, step_index: 0, step_name: '打开登录', step_type: 'http', status: 'failed',
+        duration_ms: 10, case_index: 0, case_id: 11, request: null, response: null,
+        extracted_variables: {}, assertions: [], assertion_total: 1, assertion_passed: 0,
+        error_message: null,
+      },
+    ]
+
+    const groups = store.caseGroups
+    expect(groups).toHaveLength(2)
+    expect(groups![0]!.caseName).toBe('登录')
+    expect(groups![0]!.status).toBe('failed')
+    expect(groups![0]!.steps).toHaveLength(1)
+    // 被跳用例:没有步骤行,组头仍展示(否则凭空消失)
+    expect(groups![1]!.caseName).toBe('下单')
+    expect(groups![1]!.status).toBe('skipped')
+    expect(groups![1]!.steps).toHaveLength(0)
+  })
+})
