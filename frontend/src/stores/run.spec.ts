@@ -144,6 +144,33 @@ describe('runStore', () => {
     expect(store.runItems).toEqual([PLAN_RUN_ROW])
   })
 
+  it('listRuns:快速连续请求只让最后一次落账,迟到的旧响应作废(#33 review)', async () => {
+    setActivePinia(createPinia())
+    let resolveOld!: (value: unknown) => void
+    let call = 0
+    const client = mockClient({
+      GET: vi.fn(
+        () =>
+          new Promise((resolve) => {
+            if (call++ === 0) resolveOld = resolve
+            else resolve(okResponse({ items: [PLAN_RUN_ROW], next_cursor: null }))
+          }),
+      ),
+    })
+    const store = useRunStore()
+
+    const old = store.listRuns(1, client) // 项目 A:慢
+    const fresh = store.listRuns(2, client) // 项目 B:快
+    await fresh
+    resolveOld(okResponse({ items: [RUN_RUNNING], next_cursor: 'stale' }))
+    await old
+
+    // 迟到的项目 A 响应不覆盖项目 B 的结果
+    expect(store.runItems).toEqual([PLAN_RUN_ROW])
+    expect(store.nextCursor).toBeNull()
+    expect(store.listLoading).toBe(false)
+  })
+
   it('轮询:非终态每 2s 刷新,到终态自动停', async () => {
     setActivePinia(createPinia())
     // refresh 每次拉 run + steps;第 3 次 GET(第 2 轮的 run)拿到终态
@@ -818,7 +845,11 @@ describe('runStore.plan 模式(#31)', () => {
 
     const source = FakeEventSource.instances[0]!
     source.emit('run.started', { total_steps: 1, started_at: null })
-    source.emit('step.finished', { ...stepPayload(0, 0), case_index: undefined, case_name: undefined })
+    source.emit('step.finished', {
+      ...stepPayload(0, 0),
+      case_index: undefined,
+      case_name: undefined,
+    })
 
     expect(store.steps).toHaveLength(1)
     expect(store.steps[0]!.case_index).toBe(0)
@@ -864,16 +895,47 @@ describe('runStore.plan 模式(#31)', () => {
         error: 0,
         skipped: 0,
         cases: [
-          { case_index: 0, case_id: 11, case_name: '登录', status: 'failed', total: 1, passed: 0, failed: 1, error: 0, skipped: 0 },
-          { case_index: 1, case_id: 12, case_name: '下单', status: 'skipped', total: 0, passed: 0, failed: 0, error: 0, skipped: 0 },
+          {
+            case_index: 0,
+            case_id: 11,
+            case_name: '登录',
+            status: 'failed',
+            total: 1,
+            passed: 0,
+            failed: 1,
+            error: 0,
+            skipped: 0,
+          },
+          {
+            case_index: 1,
+            case_id: 12,
+            case_name: '下单',
+            status: 'skipped',
+            total: 0,
+            passed: 0,
+            failed: 0,
+            error: 0,
+            skipped: 0,
+          },
         ],
       },
     }
     store.steps = [
       {
-        id: 1, step_index: 0, step_name: '打开登录', step_type: 'http', status: 'failed',
-        duration_ms: 10, case_index: 0, case_id: 11, request: null, response: null,
-        extracted_variables: {}, assertions: [], assertion_total: 1, assertion_passed: 0,
+        id: 1,
+        step_index: 0,
+        step_name: '打开登录',
+        step_type: 'http',
+        status: 'failed',
+        duration_ms: 10,
+        case_index: 0,
+        case_id: 11,
+        request: null,
+        response: null,
+        extracted_variables: {},
+        assertions: [],
+        assertion_total: 1,
+        assertion_passed: 0,
         error_message: null,
       },
     ]
