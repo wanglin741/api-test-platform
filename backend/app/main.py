@@ -1,5 +1,6 @@
 """FastAPI 应用入口。"""
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -13,7 +14,12 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import AppError
+from app.core.log import setup_logging
 from app.db.session import make_async_engine, make_session_factory
+
+setup_logging(get_settings().log_level)
+
+logger = logging.getLogger(__name__)
 
 
 def _error_body(code: str, message: str, details: dict | list | None = None) -> dict:
@@ -61,6 +67,8 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException) -> J
 
 @app.exception_handler(Exception)
 async def internal_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Starlette 错误中间件随后会重抛并由 uvicorn 记完整 traceback,这里只记一行摘要
+    logger.error("%s %s -> 500: %r", request.method, request.url.path, exc)
     return JSONResponse(
         status_code=500,
         content=_error_body("internal_error", "服务器内部错误"),

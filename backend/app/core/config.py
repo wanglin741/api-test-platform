@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # dev / test / prod
     env: str = "dev"
 
+    # 根日志级别,API / worker / pytest 三类进程共用
+    log_level: str = "INFO"
+
     # API 进程用 asyncpg,worker 进程用同步 psycopg(设计文档 D6)
     database_url: str = "postgresql+asyncpg://apitest:apitest@localhost:5432/apitest"
     database_url_sync: str = "postgresql+psycopg://apitest:apitest@localhost:5432/apitest"

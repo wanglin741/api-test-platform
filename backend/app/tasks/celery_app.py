@@ -4,9 +4,11 @@
 """
 
 from celery import Celery
+from celery.signals import setup_logging as celery_setup_logging
 from kombu import Queue
 
 from app.core.config import get_settings
+from app.core.log import setup_logging
 
 settings = get_settings()
 
@@ -31,3 +33,8 @@ celery_app.conf.update(
 
 # 导入任务模块完成注册
 from app.tasks import engine_tasks as _engine_tasks  # noqa: E402, F401
+
+
+@celery_setup_logging.connect
+def _configure_worker_logging(**_kwargs) -> None:
+    setup_logging(settings.log_level)
