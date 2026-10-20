@@ -15,7 +15,9 @@ from app.models import Base
 config = context.config
 
 if not config.get_main_option("sqlalchemy.url"):
-    config.set_main_option("sqlalchemy.url", get_settings().database_url_sync)
+    # set_main_option 走 configparser 插值,% 是保留字符,密码里的百分号需转义
+    url = get_settings().database_url_sync.replace("%", "%%")
+    config.set_main_option("sqlalchemy.url", url)
 
 target_metadata = Base.metadata
 
