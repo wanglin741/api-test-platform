@@ -14,7 +14,7 @@ Two independent packages with separate toolchains and **no root-level orchestrat
 
 Before writing code, read [docs/README.md](docs/README.md) for the index; the design docs there specify the target architecture, data model, execution engine, and API — follow them rather than inventing an alternative.
 
-All documentation lives under `docs/`, in a subdirectory by type (`research/`, `design/`, `api/`, `ops/`, `adr/`, `guide/`). Add new docs to the matching directory and link them from `docs/README.md`. Do not write docs elsewhere in the repo.
+All documentation lives under `docs/`, in a subdirectory by type (`research/`, `design/`, `api/`, `ops/`, `adr/`, `guide/`, `agents/`). Add new docs to the matching directory and link them from `docs/README.md`. Do not write docs elsewhere in the repo.
 
 Design docs are updated **in the same change** as the code they describe.
 
@@ -67,3 +67,17 @@ Use `npm run type-check`, not `tsc` — plain `tsc` cannot resolve types across 
 **Path alias**: `@` maps to `src/`, declared in *both* `vite.config.ts` (for resolution) and `tsconfig.app.json` (for types). Change both together or the two disagree.
 
 **Node version**: `^22.18.0 || >=24.12.0` (`package.json` engines).
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues (`wanglin741/api-test-platform`), via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles map to identical label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: vocabulary from `docs/design/` (Chinese design docs), ADRs in `docs/adr/`. See `docs/agents/domain.md`.

@@ -12,6 +12,7 @@
 | `ops/` | 部署、运维、监控、故障处理 | 开发文档 |
 | `adr/` | 架构决策记录。**重大决策的最终定论**,与 `design/` 里的论证过程互补 | 详细设计 |
 | `guide/` | 面向使用者的操作指南 | 内部实现 |
+| `agents/` | agent(含 Claude Code)在本仓库工作的约定:issue 跟踪、triage 标签、领域文档消费 | 人类使用者的操作指南 |
 
 按类型分目录,不按时间或作者分。一个文档属于哪一类,决定了它放在哪里。
 
@@ -47,6 +48,14 @@
 | 文档 | 内容 |
 |---|---|
 | [0001 用例目录采用独立目录表](adr/0001-用例目录采用独立目录表.md) | 目录建模选独立 folder 表 + 用例外键,否决统一节点表与标签平铺;支撑目录树改版(issue #20) |
+
+### Agent 约定
+
+| 文档 | 内容 |
+|---|---|
+| [Issue tracker](agents/issue-tracker.md) | issue/spec 存于 GitHub Issues,`gh` CLI 的操作约定、sub-issue/依赖/wayfinding 映射 |
+| [Triage labels](agents/triage-labels.md) | 五个 triage 角色到本仓库标签字符串的映射 |
+| [Domain docs](agents/domain.md) | agent 探索代码库时如何消费领域文档(术语表、ADR、设计文档取词) |
 
 > 全项目统一术语表见 [docs/guide/术语表.md](guide/术语表.md)(编排视图、调试、脏步骤、目录等)。
 
