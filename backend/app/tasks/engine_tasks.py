@@ -44,6 +44,7 @@ from app.models import (
     TestPlanItem,
     Variable,
 )
+from app.quality_gate import evaluate_quality_gate
 from app.run_events import StreamPublisher, finished_payload
 from app.tasks.celery_app import celery_app
 
@@ -290,7 +291,7 @@ def execute_run(self, run_id: str) -> None:
             run.duration_ms = int(summary.duration_ms)
             # skipped 步骤不参与通过率(执行引擎 §3)
             executed = summary.total_steps - summary.skipped
-            run.summary = {
+            summary_payload = {
                 "total": summary.total_steps,
                 "passed": summary.passed,
                 "failed": summary.failed,
@@ -304,7 +305,7 @@ def execute_run(self, run_id: str) -> None:
             if run.plan_id is not None:
                 # 计划执行附用例级结果(含 skipped 用例 —— 它们没有步骤行,
                 # 无法从明细聚合得到),字段形状与步骤汇总一致(total/error 同名)
-                run.summary["cases"] = [
+                summary_payload["cases"] = [
                     {
                         "case_index": o.case_index,
                         "case_id": o.case_id,
@@ -318,6 +319,8 @@ def execute_run(self, run_id: str) -> None:
                     }
                     for o in summary.cases
                 ]
+            # 正常终态(含 stopped)求值门禁;无配置时不写 gate_passed
+            run.summary = evaluate_quality_gate(run.quality_gate, summary_payload)
             session.commit()
             # run.finished 由任务层发(与 run.started 成对):漏发会让前端永久挂起
             publisher.publish(RUN_FINISHED, finished_payload(run.status, run.summary))
@@ -334,10 +337,14 @@ def execute_run(self, run_id: str) -> None:
             return
         run.status = "error"
         run.finished_at = func.now()
-        run.summary = {
-            "total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0,
-            "assertion_total": 0, "assertion_passed": 0,
-        }
+        # 异常兜底也是终态:门禁照常求值(不改 state)
+        run.summary = evaluate_quality_gate(
+            run.quality_gate,
+            {
+                "total": 0, "passed": 0, "failed": 0, "error": 1, "skipped": 0,
+                "assertion_total": 0, "assertion_passed": 0,
+            },
+        )
         session.commit()
         # 崩溃兜底路径同样要发终态事件:订阅端才知道该收尾了。
         # publisher 尚未构造的窗口(DB 错误 / 版本缺失 / DSL 解析失败)走兜底发布

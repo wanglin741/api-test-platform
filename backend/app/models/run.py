@@ -69,6 +69,9 @@ class Run(Base, TimestampMixin):
     started_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 质量门禁配置(spec #35 决策 #10):持久化在 run 上,worker 终态求值可取回;
+    # 定时 run 不携带门禁
+    quality_gate: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 

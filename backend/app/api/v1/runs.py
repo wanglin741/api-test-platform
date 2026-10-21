@@ -30,6 +30,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
 from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
 from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
+from app.quality_gate import evaluate_quality_gate
 from app.run_builder import build_plan_run
 from app.run_events import finished_payload, stream_key
 from app.schemas.runs import (
@@ -158,6 +159,10 @@ async def _prepare_run(
             )
         )
 
+    # 门禁配置持久化在 run 上(spec #35 决策 #10):worker 终态求值要取回。
+    # 单用例与计划两条构造路径共用这一处赋值;定时 tick 不经过这里(无门禁)。
+    if payload.quality_gate is not None:
+        run.quality_gate = payload.quality_gate.model_dump(exclude_none=True)
     session.add(run)
     return run
 
@@ -456,6 +461,9 @@ async def cancel_run(
 
     run.cancel_requested_at = func.now()
     run.status = "stopped" if run.status == "pending" else "stopping"
+    if run.status == "stopped":
+        # 排队中被取消也是终态(任务不会执行):门禁照常求值,不改状态
+        run.summary = evaluate_quality_gate(run.quality_gate, run.summary)
     await session.flush()
     return CancelAck(run_id=run.id, status=run.status)
 

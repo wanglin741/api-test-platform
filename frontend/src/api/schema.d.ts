@@ -1003,6 +1003,16 @@ export interface components {
         [key: string]: unknown
       } | null
     }
+    /**
+     * QualityGate
+     * @description 质量门禁:两项均可选、至少配一项(spec #35 决策 #9)。
+     */
+    QualityGate: {
+      /** Min Pass Rate */
+      min_pass_rate?: number | null
+      /** Max Error Count */
+      max_error_count?: number | null
+    }
     /** RequestSnapshotOut */
     RequestSnapshotOut: {
       /** Method */
@@ -1049,6 +1059,7 @@ export interface components {
       plan_id?: number | null
       /** Environment Id */
       environment_id?: number | null
+      quality_gate?: components['schemas']['QualityGate'] | null
     }
     /** RunOut */
     RunOut: {

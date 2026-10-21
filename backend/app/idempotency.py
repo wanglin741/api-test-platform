@@ -77,11 +77,20 @@ def idempotency_key(project_id: int, principal, header_value: str) -> str:
 
 
 def request_fingerprint(payload) -> str:
-    """规范化目标字段(排序 + 紧凑 JSON)后取哈希;同 key 换 body 即 409。"""
+    """规范化目标字段(排序 + 紧凑 JSON)后取哈希;同 key 换 body 即 409。
+
+    门禁参数也是执行语义的一部分:同 key 改门禁阈值必须 409,不能悄悄
+    重放一个按旧阈值求值的 run。
+    """
     target = {
         "case_id": payload.case_id,
         "plan_id": payload.plan_id,
         "environment_id": payload.environment_id,
+        "quality_gate": (
+            payload.quality_gate.model_dump(exclude_none=True)
+            if payload.quality_gate is not None
+            else None
+        ),
     }
     canonical = json.dumps(target, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

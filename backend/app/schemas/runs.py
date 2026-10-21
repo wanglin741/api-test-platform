@@ -4,7 +4,20 @@ import datetime
 import uuid
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+
+class QualityGate(BaseModel):
+    """质量门禁:两项均可选、至少配一项(spec #35 决策 #9)。"""
+
+    min_pass_rate: float | None = Field(default=None, ge=0, le=1)
+    max_error_count: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _at_least_one(self) -> "QualityGate":
+        if self.min_pass_rate is None and self.max_error_count is None:
+            raise ValueError("min_pass_rate 与 max_error_count 至少配置一项")
+        return self
 
 
 class RunCreate(BaseModel):
@@ -13,6 +26,8 @@ class RunCreate(BaseModel):
     case_id: int | None = None
     plan_id: int | None = None
     environment_id: int | None = None
+    # 可选门禁:持久化在 run 上,终态求值写 summary.gate_passed(不改 run.status)
+    quality_gate: QualityGate | None = None
 
 
 class RunTriggered(BaseModel):

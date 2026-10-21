@@ -272,6 +272,7 @@ audit-logs
 {
   "plan_id": 12,
   "environment_id": 5,
+  "quality_gate": { "min_pass_rate": 0.95, "max_error_count": 0 },
   "case_version": null,
   "parameters_override": { "username": ["alice"] },
   "callback_url": "https://ci.example.com/hooks/test-done"
@@ -283,6 +284,8 @@ audit-logs
 **请求体不接受 `trigger_mode`**(spec #35 决策 #1)。触发来源由服务端按凭据判定,避免自报伪造:无 Bearer → `manual`,`triggered_by` 为种子用户;API Token → `ci`,`triggered_by` 为空;调度 tick → `schedule`。请求体若携带 `trigger_mode` 字段会被忽略。Token 触发需 `run:trigger` scope。
 
 计划触发时:`environment_id` 覆盖计划的默认环境,两者都缺 → 422 `environment_required`;清单为空 → 422 `plan_items_empty`。单用例触发必须带 `environment_id`。
+
+**`quality_gate` 可选**(spec #35 决策 #9/#10):`{min_pass_rate?, max_error_count?}`,两项均可选但**至少配置一项**,空对象 → 422 `validation_error`。`min_pass_rate` 取值 0–1;`max_error_count` ≥ 0,对应步骤级 `error`。配置随 run 持久化;终态后求值写入 `summary.gate_passed`,**不改变 run.status**;未配置时 `summary` 中不出现该键。定时 run 不携带门禁。门禁参数是触发语义的一部分,与目标字段一起进入 `Idempotency-Key` 的 fingerprint:同 key 改阈值 → 409 `idempotency_key_reused`。
 
 响应 **202 Accepted**:
 

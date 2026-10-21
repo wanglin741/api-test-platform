@@ -124,6 +124,25 @@ async def test_same_key_different_body_conflicts(client):
     assert await _run_count(client, setup["project_id"]) == 1
 
 
+async def test_same_key_different_quality_gate_conflicts(client):
+    """门禁参数进入 fingerprint:同 key 换门禁必须 409,相同则重放(#40)。"""
+    setup = await _setup_plan(client)
+    first = await _trigger(client, setup, key="ci-build-gate", quality_gate={"min_pass_rate": 0.9})
+    assert first.status_code == 202, first.text
+
+    changed = await _trigger(
+        client, setup, key="ci-build-gate", quality_gate={"min_pass_rate": 0.95}
+    )
+    assert changed.status_code == 409, changed.text
+    assert changed.json()["error"]["code"] == "idempotency_key_reused"
+
+    same = await _trigger(client, setup, key="ci-build-gate", quality_gate={"min_pass_rate": 0.9})
+    assert same.status_code == 202, same.text
+    assert same.headers.get("Idempotent-Replayed") == "true"
+    assert same.json()["run_id"] == first.json()["run_id"]
+    assert await _run_count(client, setup["project_id"]) == 1
+
+
 async def test_same_key_isolated_across_projects(client):
     setup_a = await _setup_plan(client)
     setup_b = await _setup_plan(client)

@@ -33,6 +33,14 @@ def test_migration_replay(database: None) -> None:
             "api_token",
             "alembic_version",
         } <= tables
+        # 门禁配置持久化在 run 上(#40);重放后列必须存在
+        run_columns = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'run'"
+            ).fetchall()
+        }
+        assert "quality_gate" in run_columns
         # 重放后种子用户必须存在(get_current_user 依赖它)
         row = conn.execute(
             "SELECT username, is_superuser FROM \"user\" WHERE username = 'admin'"
