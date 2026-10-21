@@ -293,3 +293,39 @@ async def test_unknown_schedule_404(client):
     resp = await client.patch("/api/v1/schedules/99999", json={"name": "x"})
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "schedule_not_found"
+
+
+async def test_patch_explicit_null_422(client):
+    """显式 null 是非法值(缺省用「不传」表达),挡成 422 而不是 500。"""
+    project_id = await _create_project(client)
+    plan = await _create_plan(client, project_id, "回归")
+    schedule = await _create_schedule(client, project_id, plan["id"])
+
+    for field in ("name", "cron_expression", "timezone"):
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule['id']}", json={field: None}
+        )
+        assert resp.status_code == 422, (field, resp.text)
+
+    # environment_id 例外:显式 null = 清空覆盖环境,合法
+    resp = await client.patch(
+        f"/api/v1/schedules/{schedule['id']}", json={"environment_id": None}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["environment_id"] is None
+
+
+async def test_patch_disabled_schedule_keeps_next_run_at_null(client):
+    """停用态改 cron/时区不重算:保持「停用 → 置空」不变量。"""
+    project_id = await _create_project(client)
+    plan = await _create_plan(client, project_id, "回归")
+    schedule = await _create_schedule(client, project_id, plan["id"])
+    disabled = await client.post(f"/api/v1/schedules/{schedule['id']}/disable")
+    assert disabled.json()["next_run_at"] is None
+
+    resp = await client.patch(
+        f"/api/v1/schedules/{schedule['id']}", json={"cron_expression": "30 8 * * 1-5"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enabled"] is False
+    assert resp.json()["next_run_at"] is None

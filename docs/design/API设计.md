@@ -102,11 +102,12 @@ Idempotency-Key: ci-build-1234-attempt-2
 | 状态 | value | TTL | 写入时机 |
 |---|---|---|---|
 | `pending` | `{"state":"pending","fingerprint","nonce"}` | 60s | 请求进入、资源校验之前 `SET NX` 抢锁 |
-| `done` | `{"state":"done","fingerprint","run_id"}` | 24h | run 提交后、任务投递前 Lua CAS(按 `nonce`) |
+| `done` | `{"state":"done","fingerprint","run_id"}` | 24h | run 提交**且任务投递成功后** Lua CAS(按 `nonce`) |
 
 - pending 的短 TTL 只覆盖「校验 + 建 run」窗口,进程崩溃不会永久占坑。
 - 并发同键请求在 pending 期短轮询:等到 `done` 即重放;仍无结果 → **409 `idempotency_in_progress`**,带 `Retry-After` 响应头。
 - 业务校验失败(缺环境、计划为空等)→ 释放本次持有的 pending,**不消耗 key**,修正后同一 key 可重试。
+- **任务投递失败** → 释放本次持有的 pending,并把 run 落 `error` 终态(`summary.dispatch_failed`),同 key 重试会正常新建 run;绝不把一条从未入队的 run 写进 done 供 24h 重放。
 - 重放响应为 **202** + `Idempotent-Replayed: true`,`run_id` 为首次执行。
 - 写 done 用 Lua 按 `nonce` CAS:不会覆盖后来者重新抢到的锁。
 
@@ -345,7 +346,8 @@ audit-logs
 ```
 
 - **校验**:计划与环境必须归属本项目(不符一律 404,不探测);cron 仅接受标准 5 段(带秒的 6 段不支持),非法 → 422 `cron_invalid`;时区必须是合法 IANA 名称 → 422 `timezone_invalid`。
-- **重算语义(spec #35 决策 #5)**:创建/启用/修改 cron 或 timezone → 从当前时间重算 `next_run_at`;仅改名/改环境不重算;停用 → 置空;删除为软删,同时停用并清空 `next_run_at`。
+- **重算语义(spec #35 决策 #5)**:创建/启用/修改 cron 或 timezone → 从当前时间重算 `next_run_at`;仅改名/改环境不重算;**停用态**改 cron/时区也不重算(保持置空);停用 → 置空;删除为软删,同时停用并清空 `next_run_at`。
+- **PATCH 只处理出现的字段**(`exclude_unset`,`null` ≠ 未传):`name`/`cron_expression`/`timezone` 显式传 `null` → 422;`environment_id` 显式 `null` 合法,表示清空覆盖、回退计划默认环境。
 - **`next_run_at` 持久化存 UTC**,按调度自己的时区解释 cron;列表/详情返回该字段,前端直接展示。
 - 定时执行产生的 run `trigger_mode = schedule`、`triggered_by` 为空、`schedule_id` 指回调度(调度删除后保留,历史可追溯);派发语义(tick、重叠跳过、misfire)见功能模块 §2 与数据模型 §10。
 

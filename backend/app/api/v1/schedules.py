@@ -111,7 +111,9 @@ async def update_schedule(
     data = payload.model_dump(exclude_unset=True)
     if "environment_id" in data:
         await _validate_environment(session, schedule.project_id, data["environment_id"])
-    recompute = "cron_expression" in data or "timezone" in data
+    # 停用态不重算:保持「停用 → next_run_at 置空」不变量,否则 UI 会给
+    # 已停用的调度显示未来执行时间(enable 时会重新计算)
+    recompute = schedule.enabled and ("cron_expression" in data or "timezone" in data)
     for field, value in data.items():
         setattr(schedule, field, value)
     if recompute:

@@ -10,13 +10,10 @@ import CiAccessPanel from '@/components/CiAccessPanel.vue'
 import SchedulePanel from '@/components/SchedulePanel.vue'
 import { passRateText } from '@/lib/format'
 import { usePlanStore } from '@/stores/plan'
-import { useProjectStore } from '@/stores/project'
 import { useRunStore } from '@/stores/run'
 
 const route = useRoute()
 const router = useRouter()
-const projectStore = useProjectStore()
-const { currentId } = storeToRefs(projectStore)
 const planStore = usePlanStore()
 const { current, planItems } = storeToRefs(planStore)
 
@@ -46,14 +43,21 @@ const environments = ref<{ id: number; name: string }[]>([])
 async function loadAll() {
   loading.value = true
   try {
-    if (currentId.value !== null) {
-      const { data } = await api.GET('/api/v1/projects/{project_id}/environments', {
-        params: { path: { project_id: currentId.value } },
-      })
-      environments.value = data ?? []
-    }
     const plan = await planStore.loadDetail(planId.value, api)
     if (plan) {
+      // 本页所有资源归属都用计划自己的 project_id,不信全局选中项 ——
+      // 直链/刷新时两者可能不一致(前端设计 §6 归属约定)
+      const projectId = plan.project_id
+      const [envResp, caseResp] = await Promise.all([
+        api.GET('/api/v1/projects/{project_id}/environments', {
+          params: { path: { project_id: projectId } },
+        }),
+        api.GET('/api/v1/projects/{project_id}/cases', {
+          params: { path: { project_id: projectId }, query: { page: 1, page_size: 200 } },
+        }),
+      ])
+      environments.value = envResp.data ?? []
+      cases.value = (caseResp.data?.items ?? []) as CaseRow[]
       form.value = {
         name: plan.name,
         description: plan.description ?? '',
@@ -62,9 +66,8 @@ async function loadAll() {
         concurrency: plan.concurrency,
         stop_on_fail: plan.stop_on_fail,
       }
-      // 最近执行不阻塞整页渲染(次要数据,卡片自带空态);归属用计划
-      // 自己的 project_id,不信全局选中项 —— 直链/刷新时两者可能不一致
-      void runStore.listRuns(plan.project_id, api, null, RECENT_RUNS, planId.value)
+      // 最近执行不阻塞整页渲染(次要数据,卡片自带空态)
+      void runStore.listRuns(projectId, api, null, RECENT_RUNS, planId.value)
     }
   } finally {
     loading.value = false
@@ -110,13 +113,13 @@ async function saveConfig() {
 
 async function removePlan() {
   const plan = current.value
-  if (!plan || currentId.value === null) return
+  if (!plan) return
   try {
     await ElMessageBox.confirm(`确定删除计划「${plan.name}」?`, '删除确认', { type: 'warning' })
   } catch {
     return
   }
-  await planStore.remove(currentId.value, plan.id)
+  await planStore.remove(plan.project_id, plan.id)
   void router.push('/plans')
 }
 
@@ -131,16 +134,17 @@ function openTrigger() {
 }
 
 async function confirmTrigger() {
-  if (currentId.value === null) return
+  const plan = current.value
+  if (!plan) return
   if (triggerEnvId.value === null) {
     ElMessage.warning('请选择执行环境')
     return
   }
   triggering.value = true
   try {
-    const runId = await runStore.triggerPlan(currentId.value, planId.value, triggerEnvId.value)
+    const runId = await runStore.triggerPlan(plan.project_id, planId.value, triggerEnvId.value)
     if (runId !== null) {
-      runStore.rememberEnv(currentId.value, triggerEnvId.value)
+      runStore.rememberEnv(plan.project_id, triggerEnvId.value)
       triggerDialog.value = false
       void router.push(`/runs/${runId}`)
     }
@@ -191,13 +195,6 @@ async function saveItems() {
   }
 }
 
-onMounted(async () => {
-  if (currentId.value === null) return
-  const { data } = await api.GET('/api/v1/projects/{project_id}/cases', {
-    params: { path: { project_id: currentId.value }, query: { page: 1, page_size: 200 } },
-  })
-  cases.value = (data?.items ?? []) as CaseRow[]
-})
 </script>
 
 <template>
@@ -278,11 +275,10 @@ onMounted(async () => {
       </el-form>
     </el-card>
 
-    <SchedulePanel v-if="currentId !== null" :project-id="currentId" :plan-id="planId" />
+    <SchedulePanel :project-id="current.project_id" :plan-id="planId" />
 
     <CiAccessPanel
-      v-if="currentId !== null"
-      :project-id="currentId"
+      :project-id="current.project_id"
       :plan-id="planId"
       :plan-environment-id="current.environment_id"
     />

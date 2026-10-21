@@ -6,8 +6,9 @@ Redis 键 `idem:{project_id}:{principal}:{sha256(header)}`:项目与调用主体
 
 - pending:`{"state":"pending","fingerprint":...,"nonce":...}`,SETNX 抢锁,
   短 TTL 只管「校验 + 建 run」这段窗口,进程崩溃也不会永久占坑;
-- done:`{"state":"done","fingerprint":...,"run_id":...}`,run 提交后由 Lua
-  按 nonce CAS 写入并保留 24 小时;非本次请求持有的 pending 不覆盖。
+- done:`{"state":"done","fingerprint":...,"run_id":...}`,run 提交且任务
+  投递成功后由 Lua 按 nonce CAS 写入并保留 24 小时;非本次请求持有的
+  pending 不覆盖。投递失败不写 done(见调用方),避免重放一条从未入队的 run。
 
 fingerprint 是目标字段(用例/计划/环境)的规范化 JSON 哈希 —— 同 key
 不同请求体必须 409,不能悄悄返回不匹配的旧 run。业务校验失败由调用方

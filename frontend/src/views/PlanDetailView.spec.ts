@@ -201,6 +201,27 @@ describe('PlanDetailView', () => {
     expect(runsCall[1].params.query.plan_id).toBe(1)
     expect(wrapper.findAll('.recent-row')).toHaveLength(0)
   })
+
+  it('调度/CI 面板按计划自己的 project_id 拉取,不信全局选中项目(#33 review)', async () => {
+    // 计划属于项目 1,全局选中却是项目 2;面板不能拿 2 去拉调度/Token
+    mockGets()
+    setActivePinia(createPinia())
+    useProjectStore().currentId = 2
+    mount(PlanDetailView, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    const schedulesCall = get.mock.calls.find((call) =>
+      String(call[0]).includes('/schedules'),
+    ) as [string, { params: { path: { project_id: number }; query?: { plan_id?: number } } }]
+    expect(schedulesCall[1].params.path.project_id).toBe(1)
+    expect(schedulesCall[1].params.query?.plan_id).toBe(1)
+
+    const tokenCall = get.mock.calls.find((call) => String(call[0]).includes('/api-tokens')) as [
+      string,
+      { params: { path: { project_id: number } } },
+    ]
+    expect(tokenCall[1].params.path.project_id).toBe(1)
+  })
 })
 
 describe('PlanDetailView 触发动线(#31)', () => {

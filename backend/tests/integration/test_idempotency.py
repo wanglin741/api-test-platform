@@ -203,6 +203,39 @@ async def test_concurrent_same_key_creates_one_run(client):
     assert await _run_count(client, setup["project_id"]) == 1
 
 
+async def test_dispatch_failure_marks_error_and_releases_key(client, monkeypatch):
+    """投递失败:run 落 error 终态、幂等键释放,同 key 重试正常新建。
+
+    done 键若先于投递写入,重试只会重放一条从未入队的 run(24h)。
+    """
+    import pytest
+
+    from app.tasks.engine_tasks import execute_run
+
+    setup = await _setup_plan(client)
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(execute_run, "delay", _boom)
+    with pytest.raises(RuntimeError, match="broker down"):
+        await _trigger(client, setup, key="ci-dispatch-fail")
+
+    runs = (await client.get(f"/api/v1/projects/{setup['project_id']}/runs?limit=10")).json()
+    assert len(runs["items"]) == 1
+    stranded = runs["items"][0]
+    assert stranded["status"] == "error"
+    assert stranded["summary"]["dispatch_failed"] is True
+
+    # key 已释放:同 key 重试不再重放死 run,而是正常新建
+    monkeypatch.undo()
+    retried = await _trigger(client, setup, key="ci-dispatch-fail")
+    assert retried.status_code == 202, retried.text
+    assert retried.headers.get("Idempotent-Replayed") is None
+    assert retried.json()["run_id"] != stranded["run_id"]
+    assert await _run_count(client, setup["project_id"]) == 2
+
+
 async def test_business_failure_does_not_consume_key(client):
     setup = await _setup_plan(client, default_env=False)
     # 计划没有默认环境,且请求不带环境 ⇒ 业务校验 422

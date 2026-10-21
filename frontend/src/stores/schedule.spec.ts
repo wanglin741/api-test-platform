@@ -73,6 +73,13 @@ describe('scheduleStore', () => {
     expect((client.POST as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBe(
       '/api/v1/projects/{project_id}/schedules',
     )
+    // 重载必须带 plan_id:不带会拿项目级全量列表回填到计划卡片
+    const [reloadPath, reloadOpts] = (client.GET as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { params: { query?: { plan_id?: number } } },
+    ]
+    expect(reloadPath).toBe('/api/v1/projects/{project_id}/schedules')
+    expect(reloadOpts.params.query?.plan_id).toBe(10)
   })
 
   it('update:PATCH 后同步列表行', async () => {
@@ -106,6 +113,12 @@ describe('scheduleStore', () => {
 
     expect(store.items).toHaveLength(1)
     expect(store.items[0]?.id).toBe(2)
+    // 按被删行所属计划重载(首次 load 无过滤,重载带 plan_id=10)
+    const reload = (client.GET as ReturnType<typeof vi.fn>).mock.calls[1] as [
+      string,
+      { params: { query?: { plan_id?: number } } },
+    ]
+    expect(reload[1].params.query?.plan_id).toBe(10)
   })
 
   it('enable/disable:POST 后用响应行替换列表行', async () => {

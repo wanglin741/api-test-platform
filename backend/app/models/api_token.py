@@ -7,7 +7,7 @@
 
 import datetime
 
-from sqlalchemy import DateTime, String
+from sqlalchemy import DateTime, Index, String
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,6 +16,9 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin, fk_column, pk
 
 class ApiToken(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "api_token"
+    # 与迁移 c3f7a91b2d44 建出的索引保持一致:model 不声明会让后续
+    # autogenerate 误判为多余索引并生成 drop
+    __table_args__ = (Index("ix_api_token_project_id", "project_id"),)
 
     id: Mapped[int] = pk()
     project_id: Mapped[int] = fk_column("project", nullable=False)

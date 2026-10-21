@@ -185,6 +185,30 @@ async def _dispatch(session: AsyncSession, run: Run, response: Response) -> RunT
     return RunTriggered(run_id=run.id, status=run.status)
 
 
+async def _mark_dispatch_failed(session: AsyncSession, run: Run) -> None:
+    """投递失败补偿:落 error 终态,不留永久 pending(与调度 tick 同语义)。
+
+    投递失败时 run 已被提交;标记 error 让重叠检查与 CI 轮询都能收敛,
+    而不是对着一条永远不会执行的 pending 记录干等。
+    """
+    await session.rollback()
+    stranded = await session.get(Run, run.id)
+    if stranded is not None and stranded.status == "pending":
+        stranded.status = "error"
+        stranded.finished_at = func.now()
+        stranded.summary = {
+            "total": 0,
+            "passed": 0,
+            "failed": 0,
+            "error": 1,
+            "skipped": 0,
+            "assertion_total": 0,
+            "assertion_passed": 0,
+            "dispatch_failed": True,
+        }
+        await session.commit()
+
+
 def _validate_idempotency_header(value: str) -> None:
     if not value.strip() or len(value) > idem.MAX_KEY_LENGTH:
         raise ValidationFailedError(
@@ -252,13 +276,27 @@ async def _trigger_idempotent(
             raise
 
         try:
+            # 先投递、后写 done:done 键一旦写入会保留 24h,若先写再投递,
+            # 投递失败时同 key 重试只会重放一条从未入队的 run
+            result = await _dispatch(session, run, response)
+        except Exception:
+            logger.exception("run %s 投递失败", run.id)
+            # 释放本次持有的 pending,让同 key 可重试(而不是重放死 run)
+            try:
+                await idem.abort(client, key, acquired.nonce)
+            except RedisError:
+                logger.warning("幂等键 abort 失败: %s", key, exc_info=True)
+            await _mark_dispatch_failed(session, run)
+            raise
+
+        try:
             if not await idem.mark_done(client, key, fingerprint, acquired.nonce, run.id):
                 logger.warning("幂等键 CAS 写 done 未生效(可能已过期): %s", key)
         except RedisError:
-            # run 已提交:不能因 Redis 抖动把一次成功触发报成失败
+            # run 已投递:不能因 Redis 抖动把一次成功触发报成失败
             logger.warning("幂等键写 done 失败,本次仍按已创建返回: %s", key, exc_info=True)
 
-        return await _dispatch(session, run, response)
+        return result
     finally:
         if client is not None:
             await client.aclose()
@@ -290,7 +328,12 @@ async def trigger_run(
 
     run = await _prepare_run(session, project_id, payload, principal)
     await session.commit()
-    return await _dispatch(session, run, response)
+    try:
+        return await _dispatch(session, run, response)
+    except Exception:
+        logger.exception("run %s 投递失败", run.id)
+        await _mark_dispatch_failed(session, run)
+        raise
 
 
 async def _validate_environment(

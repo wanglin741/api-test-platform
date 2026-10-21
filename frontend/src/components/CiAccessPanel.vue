@@ -21,8 +21,9 @@ const props = defineProps<{
 const store = useApiTokenStore()
 
 const environments = ref<{ id: number; name: string }[]>([])
-// curl 片段里显式指定的环境;清空即沿用计划默认环境(不写 environment_id)
-const environmentId = ref<number | null>(props.planEnvironmentId ?? null)
+// curl 片段里显式指定的环境;清空即沿用计划默认环境(不写 environment_id)。
+// 可清除 select 清空时给 undefined,因此类型含 undefined,判空用 != null
+const environmentId = ref<number | null | undefined>(props.planEnvironmentId ?? null)
 
 async function loadEnvironments() {
   const { data } = await api.GET('/api/v1/projects/{project_id}/environments', {
@@ -130,7 +131,7 @@ async function copyText(text: string) {
 // ── curl 片段:服务端判定 trigger_mode,片段里不自报 ──────────────────
 const curlSnippet = computed(() => {
   const body = [`"plan_id": ${props.planId}`]
-  if (environmentId.value !== null) body.push(`"environment_id": ${environmentId.value}`)
+  if (environmentId.value != null) body.push(`"environment_id": ${environmentId.value}`)
   const url = `${window.location.origin}/api/v1/projects/${props.projectId}/runs`
   return [
     `curl -X POST "${url}" \\`,

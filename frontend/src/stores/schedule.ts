@@ -48,7 +48,9 @@ export const useScheduleStore = defineStore('schedule', () => {
       body: payload,
     })
     if (!data) return null
-    await load(projectId, null, client)
+    // 重载保持计划过滤:计划卡片不能拿项目级全量列表回填,否则同项目
+    // 其他计划的调度会串进来并可被误操作
+    await load(projectId, payload.plan_id, client)
     return data
   }
 
@@ -68,12 +70,13 @@ export const useScheduleStore = defineStore('schedule', () => {
     return data
   }
 
-  /** 删除调度:成功后重载列表。 */
+  /** 删除调度:成功后按被删行所属计划重载列表(保持计划过滤)。 */
   async function remove(projectId: number, scheduleId: number, client: ApiClient = api) {
+    const planId = items.value.find((s) => s.id === scheduleId)?.plan_id ?? null
     await client.DELETE('/api/v1/schedules/{schedule_id}', {
       params: { path: { schedule_id: scheduleId } },
     })
-    await load(projectId, null, client)
+    await load(projectId, planId, client)
   }
 
   /** 启停:响应当作权威行替换(next_run_at 语义在服务端)。 */

@@ -90,7 +90,9 @@ const form = ref({
   name: '',
   cron_expression: '0 2 * * *',
   timezone: 'Asia/Shanghai',
-  environment_id: null as number | null,
+  // Element Plus 清空可清除项时给 undefined(value-on-clear 默认值),
+  // 提交前统一归一成 null(= 不覆盖,回退计划默认环境)
+  environment_id: null as number | null | undefined,
 })
 
 function openCreate() {
@@ -133,8 +135,10 @@ async function submitDialog() {
       if (form.value.cron_expression !== editing.value.cron_expression)
         payload.cron_expression = form.value.cron_expression
       if (form.value.timezone !== editing.value.timezone) payload.timezone = form.value.timezone
-      if (form.value.environment_id !== editing.value.environment_id)
-        payload.environment_id = form.value.environment_id
+      const environmentId = form.value.environment_id ?? null
+      // 显式送 null 才能清空覆盖环境:undefined 会被 JSON 丢弃,后端
+      // exclude_unset 视为「没改」
+      if (environmentId !== editing.value.environment_id) payload.environment_id = environmentId
       await store.update(editing.value.id, payload)
     } else {
       await store.create(props.projectId, {
@@ -142,7 +146,7 @@ async function submitDialog() {
         plan_id: props.planId,
         cron_expression: form.value.cron_expression,
         timezone: form.value.timezone,
-        environment_id: form.value.environment_id,
+        environment_id: form.value.environment_id ?? null,
       })
     }
     ElMessage.success('已保存')

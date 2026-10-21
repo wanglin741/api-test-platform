@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ElementPlus, { ElMessage, ElMessageBox } from 'element-plus'
 
@@ -184,6 +184,20 @@ describe('CiAccessPanel curl 片段(#42)', () => {
     expect(snippet).toContain('"environment_id": 3')
     expect(snippet).toContain('Idempotency-Key')
     expect(snippet).not.toContain('trigger_mode')
+  })
+
+  it('清空环境选择后片段省略 environment_id(沿用计划默认环境)', async () => {
+    mockGets()
+    const wrapper = await mountPanel(3)
+    expect(wrapper.find('.curl-snippet').text()).toContain('"environment_id": 3')
+
+    // 可清除 select 清空时给 undefined
+    ;(wrapper.findComponent('.curl-env') as VueWrapper).vm.$emit('update:modelValue', undefined)
+    await flushPromises()
+
+    const snippet = wrapper.find('.curl-snippet').text()
+    expect(snippet).not.toContain('environment_id')
+    expect(snippet).toContain('"plan_id": 10')
   })
 
   it('复制 curl:写入剪贴板;失败时提示', async () => {

@@ -20,6 +20,8 @@ class Schedule(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_schedule_enabled_next_run_at", "enabled", "next_run_at"),
         Index("ix_schedule_plan_id", "plan_id"),
+        # 项目作用域的调度列表(数据模型 §10)
+        Index("ix_schedule_project_id", "project_id"),
     )
 
     id: Mapped[int] = pk()

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import ElementPlus, { ElMessageBox } from 'element-plus'
 
@@ -190,6 +190,24 @@ describe('SchedulePanel(计划详情的定时调度卡片,#36)', () => {
     expect(path).toBe('/api/v1/schedules/{schedule_id}')
     expect(opts.body).toEqual({ cron_expression: '0 5 * * *' })
     expect(wrapper.find('.schedule-row').text()).toContain('0 5 * * *')
+  })
+
+  it('编辑:清空覆盖环境后 PATCH 显式传 null(undefined 会被 JSON 丢弃)', async () => {
+    mockGets({ schedules: [{ ...SCHEDULE, environment_id: 3 }] })
+    const wrapper = await mountPanel()
+    patch.mockResolvedValue(okResponse({ ...SCHEDULE, environment_id: null }))
+
+    await wrapper.find('.schedule-row .edit-btn').trigger('click')
+    await flushPromises()
+    // 可清除 select 清空时给 undefined(value-on-clear 默认值)
+    ;(wrapper.findComponent('.env-select') as VueWrapper).vm.$emit('update:modelValue', undefined)
+    await flushPromises()
+    await wrapper.find('.el-dialog__footer .el-button--primary').trigger('click')
+    await flushPromises()
+
+    const [path, opts] = patch.mock.calls[0] as [string, { body: Record<string, unknown> }]
+    expect(path).toBe('/api/v1/schedules/{schedule_id}')
+    expect(opts.body).toEqual({ environment_id: null })
   })
 })
 
