@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { api } from '@/api/client'
+import { downloadText, junitFileName } from '@/utils/format'
 
 import type { ApiClient } from '@/api/client'
 import type { components } from '@/api/schema'
@@ -227,6 +228,16 @@ export const useRunStore = defineStore('run', () => {
   async function cancel(runId: string, client: ApiClient = api): Promise<void> {
     await client.POST('/api/v1/runs/{run_id}/cancel', { params: { path: { run_id: runId } } })
     await refresh(runId, client)
+  }
+
+  /** 导出终态 JUnit(前端设计 §6.9):文本响应转 Blob 下载,
+   * 文件名优先取服务端 Content-Disposition,缺失回退 run-{id}.xml。 */
+  async function exportJunit(runId: string, client: ApiClient = api): Promise<void> {
+    const { data, response } = await client.GET('/api/v1/runs/{run_id}/export', {
+      params: { path: { run_id: runId }, query: { format: 'junit' } },
+      parseAs: 'text',
+    })
+    downloadText(data ?? '', junitFileName(response.headers.get('Content-Disposition'), runId))
   }
 
   // ── SSE 实时进度(架构设计 §6):事件流为主,轮询降级 ────────────────
@@ -503,6 +514,7 @@ export const useRunStore = defineStore('run', () => {
     startStream,
     stopStream,
     cancel,
+    exportJunit,
     lastEnvId,
     rememberEnv,
   }

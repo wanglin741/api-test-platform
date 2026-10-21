@@ -55,11 +55,13 @@ function mockGets({
   plan = PLAN as object,
   runs = { items: [], next_cursor: null } as object,
   schedules = [] as object[],
+  tokens = [] as object[],
 } = {}) {
   get.mockImplementation(async (path: unknown) => {
     const url = String(path)
     if (url.includes('/items')) return okResponse(items)
     if (url.includes('/schedules')) return okResponse(schedules)
+    if (url.includes('/api-tokens')) return okResponse(tokens)
     if (url.includes('/environments')) return okResponse([ENV_DEV])
     if (url.includes('/cases')) return okResponse({ items: [CASE_LOGIN, CASE_ORDER], total: 2 })
     if (url.includes('/runs')) return okResponse(runs)
@@ -126,6 +128,18 @@ describe('PlanDetailView', () => {
     await flushPromises()
     const [, opts2] = put.mock.calls[0] as [string, { body: { items: { case_id: number }[] } }]
     expect(opts2.body.items).toEqual([{ case_id: 102 }])
+  })
+
+  it('CI 接入面板挂载:按项目加载 Token 列表(#42)', async () => {
+    mockGets()
+    const wrapper = await mountView()
+
+    expect(wrapper.text()).toContain('CI 接入')
+    const tokenCall = get.mock.calls.find((call) => String(call[0]).includes('/api-tokens')) as [
+      string,
+      { params: { path: { project_id: number } } },
+    ]
+    expect(tokenCall[1].params.path.project_id).toBe(1)
   })
 
   it('最近执行:挂该计划的执行历史,点击进入报告(#33)', async () => {

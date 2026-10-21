@@ -101,9 +101,19 @@ const STEPS = {
 }
 
 function mockRun(run: object, steps: object) {
-  get.mockImplementation(async (path: unknown) =>
-    okResponse(String(path).includes('/steps') ? steps : run),
-  )
+  get.mockImplementation(async (path: unknown) => {
+    const url = String(path)
+    if (url.includes('/export')) {
+      return {
+        data: '<testsuites/>',
+        error: undefined,
+        response: new Response(null, {
+          headers: { 'Content-Disposition': 'attachment; filename="run-r-1.xml"' },
+        }),
+      }
+    }
+    return okResponse(url.includes('/steps') ? steps : run)
+  })
 }
 
 async function mountView() {
@@ -131,7 +141,7 @@ describe('RunDetailView', () => {
     expect(meta.text()).toContain('用例 #7')
     expect(meta.text()).toContain('v2')
     expect(meta.text()).toContain('环境 #3')
-    expect(meta.text()).toContain('manual')
+    expect(meta.text()).toContain('手动')
   })
 
   it('运行中(summary 未落):统计卡显示 — 而不是 0', async () => {
@@ -325,5 +335,73 @@ describe('RunDetailView 计划分组(#31)', () => {
 
     expect(wrapper.findAll('.case-head')).toHaveLength(0)
     expect(wrapper.findAll('.step-row')).toHaveLength(2)
+  })
+})
+
+describe('RunDetailView 来源/门禁/导出(#42)', () => {
+  function stubDownload() {
+    const createObjectURL = vi.fn(() => 'blob:junit')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    return { createObjectURL, click }
+  }
+
+  it('trigger_mode 映射为中文:schedule/ci 等', async () => {
+    mockRun({ ...RUN, trigger_mode: 'schedule' }, STEPS)
+    let wrapper = await mountView()
+    expect(wrapper.find('.meta-line').text()).toContain('定时')
+    expect(wrapper.find('.meta-line').text()).not.toContain('schedule')
+
+    mockRun({ ...RUN, trigger_mode: 'ci' }, STEPS)
+    wrapper = await mountView()
+    expect(wrapper.find('.meta-line').text()).toContain('CI')
+  })
+
+  it('summary.gate_passed 存在时显示门禁标签:通过/未通过', async () => {
+    mockRun({ ...RUN, summary: { ...RUN.summary, gate_passed: true } }, STEPS)
+    let wrapper = await mountView()
+    expect(wrapper.find('.gate-tag').text()).toBe('门禁通过')
+    expect(wrapper.find('.gate-tag .el-tag--success').exists()).toBe(true)
+
+    mockRun({ ...RUN, summary: { ...RUN.summary, gate_passed: false } }, STEPS)
+    wrapper = await mountView()
+    expect(wrapper.find('.gate-tag').text()).toBe('门禁未通过')
+    expect(wrapper.find('.gate-tag .el-tag--danger').exists()).toBe(true)
+  })
+
+  it('键不存在(未配置门禁)不显示门禁标签', async () => {
+    mockRun(RUN, STEPS)
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.gate-tag').exists()).toBe(false)
+  })
+
+  it('终态才显示导出按钮;点击 GET 文本导出并下载', async () => {
+    const { createObjectURL, click } = stubDownload()
+    mockRun(RUN, STEPS)
+    const wrapper = await mountView()
+
+    await wrapper.find('.export-btn').trigger('click')
+    await flushPromises()
+
+    const call = get.mock.calls.find((c) => String(c[0]).includes('/export')) as [
+      string,
+      { params: { query: { format: string } }; parseAs: string },
+    ]
+    expect(call[0]).toBe('/api/v1/runs/{run_id}/export')
+    expect(call[1].params.query.format).toBe('junit')
+    expect(call[1].parseAs).toBe('text')
+    expect(createObjectURL).toHaveBeenCalledOnce()
+
+    click.mockRestore()
+    vi.unstubAllGlobals()
+  })
+
+  it('非终态不显示导出按钮', async () => {
+    mockRun({ ...RUN, status: 'running' }, { items: [], count: 0, truncated: false })
+    const wrapper = await mountView()
+
+    expect(wrapper.find('.export-btn').exists()).toBe(false)
   })
 })

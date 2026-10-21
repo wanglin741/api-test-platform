@@ -6,6 +6,7 @@ import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
 import StepSnapshot from '@/components/StepSnapshot.vue'
 import { TERMINAL_STATUSES, useRunStore } from '@/stores/run'
+import { gatePassed, triggerModeLabel } from '@/utils/format'
 
 import type { components } from '@/api/schema'
 
@@ -83,6 +84,22 @@ const durationText = () => {
   return typeof ms === 'number' ? `${ms}ms` : '—'
 }
 
+// 门禁标签:summary.gate_passed 键存在才渲染(未配置门禁 = 不显示,#42)
+const gate = computed(() => gatePassed(runStore.run?.summary))
+
+// 导出 JUnit:仅终态可导出(#42),文本响应在 store 里转 Blob 下载
+const exporting = ref(false)
+async function exportJunit() {
+  exporting.value = true
+  try {
+    await runStore.exportJunit(runId, api)
+  } catch {
+    // 错误已由全局拦截器弹出(如 run_not_finished)
+  } finally {
+    exporting.value = false
+  }
+}
+
 // 快照明细按步骤展开/收起(前端设计 §6.2:先扫统计,再对失败步骤逐个看现场)
 // key 用「用例序号-步骤序号」复合:计划执行里 step_index 跨用例重复,
 // 单用例执行 case_index 恒 0,两种模式 key 都稳定,展开态不丢
@@ -133,6 +150,14 @@ function groupAssertion(steps: StepOut[]): string {
       <el-tag class="status-tag" :type="statusTag(runStore.run.status)" size="large">
         {{ runStore.run.status }}
       </el-tag>
+      <el-tag
+        v-if="gate !== undefined"
+        class="gate-tag"
+        :type="gate ? 'success' : 'danger'"
+        size="large"
+      >
+        {{ gate ? '门禁通过' : '门禁未通过' }}
+      </el-tag>
       <el-button
         v-if="runStore.run && !TERMINAL_STATUSES.has(runStore.run.status)"
         class="cancel-btn"
@@ -141,6 +166,14 @@ function groupAssertion(steps: StepOut[]): string {
         @click="cancel"
       >
         取消执行
+      </el-button>
+      <el-button
+        v-if="runStore.run && TERMINAL_STATUSES.has(runStore.run.status)"
+        class="export-btn"
+        :loading="exporting"
+        @click="exportJunit"
+      >
+        导出 JUnit
       </el-button>
     </div>
 
@@ -174,8 +207,8 @@ function groupAssertion(steps: StepOut[]): string {
     <div class="meta-line">
       <template v-if="runStore.run.plan_id != null">计划 #{{ runStore.run.plan_id }}</template>
       <template v-else>用例 #{{ runStore.run.case_id }}(v{{ runStore.run.case_version }})</template>
-      · 环境 #{{ runStore.run.environment_id }}
-      · {{ runStore.run.trigger_mode }} · {{ runStore.run.created_at }}
+      · 环境 #{{ runStore.run.environment_id }} ·
+      {{ triggerModeLabel(runStore.run.trigger_mode) }} · {{ runStore.run.created_at }}
     </div>
 
     <el-alert

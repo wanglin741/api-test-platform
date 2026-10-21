@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 
 import { api } from '@/api/client'
+import CiAccessPanel from '@/components/CiAccessPanel.vue'
 import SchedulePanel from '@/components/SchedulePanel.vue'
 import { usePlanStore } from '@/stores/plan'
 import { useProjectStore } from '@/stores/project'
@@ -293,6 +294,13 @@ onMounted(async () => {
     </el-card>
 
     <SchedulePanel v-if="currentId !== null" :project-id="currentId" :plan-id="planId" />
+
+    <CiAccessPanel
+      v-if="currentId !== null"
+      :project-id="currentId"
+      :plan-id="planId"
+      :plan-environment-id="current.environment_id"
+    />
 
     <el-card header="最近执行" class="recent-card">
       <el-empty v-if="recentRuns.length === 0" description="还没有执行记录" :image-size="60" />

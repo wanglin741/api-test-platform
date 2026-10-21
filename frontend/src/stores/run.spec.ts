@@ -889,3 +889,36 @@ describe('runStore.plan 模式(#31)', () => {
     expect(groups![1]!.steps).toHaveLength(0)
   })
 })
+
+describe('runStore 导出 JUnit(#42)', () => {
+  it('exportJunit:GET 文本响应转 Blob 下载,文件名取 Content-Disposition', async () => {
+    setActivePinia(createPinia())
+    const createObjectURL = vi.fn(() => 'blob:junit')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const client = mockClient({
+      GET: vi.fn(async () => ({
+        data: '<testsuites/>',
+        error: undefined,
+        response: new Response(null, {
+          headers: { 'Content-Disposition': 'attachment; filename="run-r-1.xml"' },
+        }),
+      })),
+    })
+
+    await useRunStore().exportJunit('r-1', client)
+
+    const [path, opts] = (client.GET as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      { params: unknown; parseAs: string },
+    ]
+    expect(path).toBe('/api/v1/runs/{run_id}/export')
+    expect(opts.params).toEqual({ path: { run_id: 'r-1' }, query: { format: 'junit' } })
+    expect(opts.parseAs).toBe('text')
+    expect(createObjectURL).toHaveBeenCalledOnce()
+
+    click.mockRestore()
+    vi.unstubAllGlobals()
+  })
+})
