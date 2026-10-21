@@ -39,6 +39,8 @@ class Run(Base, TimestampMixin):
         ),
         CheckConstraint("trigger_mode IN ('manual', 'schedule', 'openapi', 'ci')", name="trigger_mode"),
         Index("ix_run_project_id_created_at", "project_id", "created_at"),
+        # 计划维度收口:按计划拉最近执行(报告列表 plan_id 筛选、计划详情「最近执行」)
+        Index("ix_run_plan_id_created_at", "plan_id", "created_at"),
         Index("ix_run_status", "status"),
         Index("ix_run_celery_task_id", "celery_task_id"),
     )
@@ -50,6 +52,10 @@ class Run(Base, TimestampMixin):
     case_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     plan_id: Mapped[int | None] = mapped_column(
         ForeignKey("test_plan.id", name="fk_run_plan_id_test_plan"), nullable=True, index=True
+    )
+    # 定时触发来源;调度删除后历史 run 仍可追溯(schedule 软删,引用不断)
+    schedule_id: Mapped[int | None] = mapped_column(
+        ForeignKey("schedule.id", name="fk_run_schedule_id_schedule"), nullable=True, index=True
     )
     environment_id: Mapped[int] = fk_column("environment")
     trigger_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="manual")

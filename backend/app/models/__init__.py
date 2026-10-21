@@ -5,6 +5,7 @@ from app.models.environment import Environment
 from app.models.folder import Folder
 from app.models.project import Project
 from app.models.run import RUN_TERMINAL_STATUSES, Run, RunStepResult
+from app.models.schedule import Schedule
 from app.models.test_case import TestCase, TestCaseVersion
 from app.models.test_plan import TestPlan, TestPlanItem
 from app.models.user import User
@@ -18,6 +19,7 @@ __all__ = [
     "RUN_TERMINAL_STATUSES",
     "Run",
     "RunStepResult",
+    "Schedule",
     "TestCase",
     "TestCaseVersion",
     "TestPlan",
