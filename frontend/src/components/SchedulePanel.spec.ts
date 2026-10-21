@@ -7,12 +7,15 @@ import type { ApiClient } from '@/api/client'
 
 import SchedulePanel from './SchedulePanel.vue'
 
-const { get, post, patch, delete: del } = vi.hoisted(() => ({
+const { get, post, patch, delete: del, push } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   patch: vi.fn(),
   delete: vi.fn(),
+  push: vi.fn(),
 }))
+
+vi.mock('vue-router', () => ({ useRouter: () => ({ push }) }))
 
 vi.mock('@/api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/client')>()
@@ -187,5 +190,49 @@ describe('SchedulePanel(计划详情的定时调度卡片,#36)', () => {
     expect(path).toBe('/api/v1/schedules/{schedule_id}')
     expect(opts.body).toEqual({ cron_expression: '0 5 * * *' })
     expect(wrapper.find('.schedule-row').text()).toContain('0 5 * * *')
+  })
+})
+
+describe('SchedulePanel 上次执行与跳过原因(#37)', () => {
+  const RAN_SCHEDULE = {
+    ...SCHEDULE,
+    last_run_at: '2026-10-21T02:00:00Z',
+    last_run_id: '0b6e2c22-9c9d-4f4e-a1d2-4a5c6b7d8e9f',
+    last_skip_at: '2026-10-21T03:00:00Z',
+    last_skip_reason: 'overlap',
+  }
+
+  it('渲染上次执行时间、跳过原因中文映射,并暴露跳转上次 run 的入口', async () => {
+    mockGets({ schedules: [RAN_SCHEDULE] })
+    const wrapper = await mountPanel()
+
+    const row = wrapper.find('.schedule-row')
+    expect(row.text()).toContain('上次执行')
+    expect(row.text()).toContain('上次执行未结束,跳过本次')
+    expect(wrapper.find('.last-run-link').exists()).toBe(true)
+  })
+
+  it('点击「上次报告」跳转到该 run 的详情路由', async () => {
+    mockGets({ schedules: [RAN_SCHEDULE] })
+    const wrapper = await mountPanel()
+
+    await wrapper.find('.last-run-link').trigger('click')
+
+    expect(push).toHaveBeenCalledWith('/runs/0b6e2c22-9c9d-4f4e-a1d2-4a5c6b7d8e9f')
+  })
+
+  it('未知跳过原因原样展示,不空白', async () => {
+    mockGets({ schedules: [{ ...SCHEDULE, last_skip_reason: 'future_reason' }] })
+    const wrapper = await mountPanel()
+
+    expect(wrapper.find('.schedule-row').text()).toContain('future_reason')
+  })
+
+  it('没有跳过记录时不渲染跳过标签与跳转入口', async () => {
+    mockGets()
+    const wrapper = await mountPanel()
+
+    expect(wrapper.find('.skip-reason').exists()).toBe(false)
+    expect(wrapper.find('.last-run-link').exists()).toBe(false)
   })
 })

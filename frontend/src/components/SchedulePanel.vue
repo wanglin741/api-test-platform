@@ -1,18 +1,38 @@
 <script setup lang="ts">
 /**
- * 计划详情页的「定时调度」卡片(issue #36,前端设计 §6):
- * 列表(名称/cron/时区/下次执行/启停开关)、创建与编辑弹窗(cron 预设 + 自定义、
- * IANA 时区选择、可选覆盖环境)、删除二次确认。前端只做 5 段粗校验,服务端为权威。
+ * 计划详情页的「定时调度」卡片(issue #36/#37,前端设计 §6):
+ * 列表(名称/cron/时区/下次执行/上次执行/跳过原因/启停开关)、创建与编辑弹窗
+ * (cron 预设 + 自定义、IANA 时区选择、可选覆盖环境)、删除二次确认、
+ * 跳转上次 run 报告。前端只做 5 段粗校验,服务端为权威。
  */
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { api } from '@/api/client'
 import { useScheduleStore, type ScheduleOut } from '@/stores/schedule'
 
 const props = defineProps<{ projectId: number; planId: number }>()
 
+const router = useRouter()
 const store = useScheduleStore()
+
+// 跳过原因中文映射:与后端 schedule_tasks 的 last_skip_reason 取值一一对应(#37)
+const SKIP_REASON_LABELS: Record<string, string> = {
+  overlap: '上次执行未结束,跳过本次',
+  environment_missing: '执行环境缺失,跳过本次',
+  plan_empty: '计划清单为空,跳过本次',
+  plan_deleted: '计划已删除,调度已停用',
+  project_deleted: '项目已删除,调度已停用',
+}
+
+function skipReasonLabel(reason: string): string {
+  return SKIP_REASON_LABELS[reason] ?? reason
+}
+
+function openRun(runId: string): void {
+  void router.push(`/runs/${runId}`)
+}
 
 // 时区优先系统可用列表,jsdom/老浏览器回退常用列表(spec 决策:前端粗校验、服务端权威)
 const COMMON_TIMEZONES = [
@@ -174,6 +194,20 @@ async function removeSchedule(schedule: ScheduleOut) {
       <code class="cron">{{ s.cron_expression }}</code>
       <span class="tz">{{ s.timezone }}</span>
       <span class="next">下次执行:{{ formatTime(s.next_run_at) }}</span>
+      <span class="next">上次执行:{{ formatTime(s.last_run_at) }}</span>
+      <el-tag v-if="s.last_skip_reason" type="warning" size="small" class="skip-reason">
+        {{ skipReasonLabel(s.last_skip_reason) }}
+      </el-tag>
+      <el-button
+        v-if="s.last_run_id"
+        link
+        type="primary"
+        size="small"
+        class="last-run-link"
+        @click="openRun(s.last_run_id)"
+      >
+        上次报告
+      </el-button>
       <span class="spacer" />
       <el-switch :model-value="s.enabled" @click="toggleEnabled(s)" />
       <el-button size="small" class="edit-btn" @click="openEdit(s)">编辑</el-button>
