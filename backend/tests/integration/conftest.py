@@ -34,10 +34,15 @@ def _run_alembic(target: str) -> None:
     command.upgrade(cfg, target)
 
 
+def _admin_url() -> str:
+    """库管理(建库/清库)用同一实例的 postgres 库,凭据从测试库连接串推导。"""
+    return os.environ["APITEST_DATABASE_URL_SYNC"].replace("+psycopg", "").rsplit("/", 1)[0] + "/postgres"
+
+
 @pytest.fixture(scope="session", autouse=True)
 def database() -> None:
     """建测试库(若缺)并执行迁移;会话结束后清库,保证可重复运行。"""
-    admin = "postgresql://apitest:apitest@localhost:5432/postgres"
+    admin = _admin_url()
     with psycopg.connect(admin, autocommit=True) as conn:
         exists = conn.execute(
             "SELECT 1 FROM pg_database WHERE datname = %s", (_TEST_DB,)
