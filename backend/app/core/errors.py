@@ -17,11 +17,14 @@ class AppError(Exception):
         status_code: int | None = None,
         code: str | None = None,
         details: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         self.status_code = status_code or self.__class__.status_code
         self.code = code or self.__class__.code
         self.message = message or self.code
         self.details = details or {}
+        # 少数错误需要响应头(如幂等并发冲突的 Retry-After)
+        self.headers = headers or {}
         super().__init__(self.message)
 
 

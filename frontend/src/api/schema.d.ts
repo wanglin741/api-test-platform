@@ -2185,7 +2185,10 @@ export interface operations {
   trigger_run_api_v1_projects__project_id__runs_post: {
     parameters: {
       query?: never
-      header?: never
+      header?: {
+        /** @description 幂等键:同 key 24h 内返回首次 run,同 key 不同请求体 409 */
+        'Idempotency-Key'?: string | null
+      }
       path: {
         project_id: number
       }

@@ -3,14 +3,18 @@
 import base64
 import datetime
 import json
+import logging
 import uuid
 from collections.abc import AsyncIterator
 
 import redis.asyncio as redis_async
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from fastapi.sse import EventSourceResponse, ServerSentEvent
+from redis.exceptions import RedisError
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app import idempotency as idem
 
 from app.api.deps import (
     Principal,
@@ -42,6 +46,8 @@ from app.schemas.runs import (
 from app.tasks.engine_tasks import execute_run
 
 STEPS_HARD_CAP = 2000  # 超过截断并在响应里标记,不静默丢行
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 project_router = APIRouter(prefix="/projects/{project_id}/runs", tags=["runs"])
@@ -89,14 +95,13 @@ def _decode_cursor(cursor: str) -> tuple[datetime.datetime, uuid.UUID]:
         ) from exc
 
 
-@project_router.post("", status_code=202, response_model=RunTriggered)
-async def trigger_run(
-    project_id: int,
-    payload: RunCreate,
-    response: Response,
-    session: AsyncSession = Depends(get_db),
-    principal: Principal = Depends(get_principal),
-) -> RunTriggered:
+async def _prepare_run(
+    session: AsyncSession, project_id: int, payload: RunCreate, principal: Principal
+) -> Run:
+    """资源/权限校验并构造 run(不提交、不投递);幂等接入点在此函数之前。
+
+    校验失败抛 AppError,调用方负责分别映射 4xx / 释放幂等锁。
+    """
     await get_project_or_404(session, project_id)
     require_token_scope(principal, "run:trigger")
     require_token_project(principal, project_id)
@@ -154,15 +159,124 @@ async def trigger_run(
         )
 
     session.add(run)
-    # 先提交再投递:worker(真实或 eager)用独立会话读 run,未提交的插入对它不可见
-    await session.commit()
+    return run
 
+
+async def _dispatch(session: AsyncSession, run: Run, response: Response) -> RunTriggered:
+    """先提交再投递:worker(真实或 eager)用独立会话读 run,未提交的插入对它不可见。"""
     task = execute_run.delay(str(run.id))
     run.celery_task_id = task.id
     await session.flush()
-
     response.headers["Location"] = f"/api/v1/runs/{run.id}"
     return RunTriggered(run_id=run.id, status=run.status)
+
+
+def _validate_idempotency_header(value: str) -> None:
+    if not value.strip() or len(value) > idem.MAX_KEY_LENGTH:
+        raise ValidationFailedError(
+            "Idempotency-Key 必须非空且不超过 255 个字符",
+            code="idempotency_key_invalid",
+        )
+
+
+def _idempotency_unavailable() -> AppError:
+    return AppError(
+        status_code=503,
+        code="idempotency_unavailable",
+        message="幂等存储不可用,带幂等键的请求已拒绝",
+    )
+
+
+async def _trigger_idempotent(
+    *,
+    project_id: int,
+    payload: RunCreate,
+    response: Response,
+    idempotency_key: str,
+    session: AsyncSession,
+    principal: Principal,
+) -> RunTriggered:
+    """带 Idempotency-Key 的触发:先抢锁,再做资源校验,提交后写 done。
+
+    业务校验失败 abort(不消耗 key);Redis 异常 fail closed(503)。
+    """
+    key = idem.idempotency_key(project_id, principal, idempotency_key)
+    fingerprint = idem.request_fingerprint(payload)
+    client = None
+    try:
+        try:
+            client = idem.make_client(get_settings())
+            acquired = await idem.acquire(client, key, fingerprint)
+        except (RedisError, ValueError) as exc:
+            raise _idempotency_unavailable() from exc
+
+        if acquired.state == "replay":
+            response.headers["Idempotent-Replayed"] = "true"
+            response.headers["Location"] = f"/api/v1/runs/{acquired.run_id}"
+            return RunTriggered(run_id=acquired.run_id, status="pending")
+        if acquired.state == "reused":
+            raise ConflictError(
+                message="Idempotency-Key 已用于不同的请求",
+                code="idempotency_key_reused",
+            )
+        if acquired.state == "in_progress":
+            raise ConflictError(
+                message="相同幂等键的请求正在处理中,请稍后重试",
+                code="idempotency_in_progress",
+                headers={"Retry-After": str(idem.RETRY_AFTER_SECONDS)},
+            )
+
+        try:
+            run = await _prepare_run(session, project_id, payload, principal)
+            await session.commit()
+        except BaseException:
+            # 业务校验失败不消耗 key:释放本次持有的 pending,修正后同 key 可重试
+            try:
+                await idem.abort(client, key, acquired.nonce)
+            except RedisError:
+                logger.warning("幂等键 abort 失败: %s", key, exc_info=True)
+            raise
+
+        try:
+            if not await idem.mark_done(client, key, fingerprint, acquired.nonce, run.id):
+                logger.warning("幂等键 CAS 写 done 未生效(可能已过期): %s", key)
+        except RedisError:
+            # run 已提交:不能因 Redis 抖动把一次成功触发报成失败
+            logger.warning("幂等键写 done 失败,本次仍按已创建返回: %s", key, exc_info=True)
+
+        return await _dispatch(session, run, response)
+    finally:
+        if client is not None:
+            await client.aclose()
+
+
+@project_router.post("", status_code=202, response_model=RunTriggered)
+async def trigger_run(
+    project_id: int,
+    payload: RunCreate,
+    response: Response,
+    session: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        description="幂等键:同 key 24h 内返回首次 run,同 key 不同请求体 409",
+    ),
+) -> RunTriggered:
+    if idempotency_key is not None:
+        _validate_idempotency_header(idempotency_key)
+        return await _trigger_idempotent(
+            project_id=project_id,
+            payload=payload,
+            response=response,
+            idempotency_key=idempotency_key,
+            session=session,
+            principal=principal,
+        )
+
+    run = await _prepare_run(session, project_id, payload, principal)
+    await session.commit()
+    return await _dispatch(session, run, response)
 
 
 async def _validate_environment(

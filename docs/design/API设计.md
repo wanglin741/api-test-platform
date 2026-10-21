@@ -84,16 +84,42 @@ HTTP 状态码语义:
 
 ### 幂等
 
-`POST /runs` 支持 `Idempotency-Key` 头:
+`POST /projects/{pid}/runs` 支持 `Idempotency-Key` 头(spec #35 决策 #7):
 
 ```
 POST /api/v1/projects/1/runs
 Idempotency-Key: ci-build-1234-attempt-2
 ```
 
-同一 key 在 24 小时内重复请求返回首次的 `run_id`,不重复创建执行。CI 流水线重试是常态,没有这个机制会产生重复执行记录。
+不带该头时行为完全不变。带上后,同一 key 24 小时内重复请求返回首次的 `run_id`,不重复创建执行 —— CI 流水线重试是常态,没有这个机制会产生重复执行记录。
 
-实现:Redis `SETNX idem:{key} {run_id} EX 86400`。
+**隔离**。Redis 键为 `idem:{project_id}:{调用主体}:{sha256(header)}`,调用主体是 `token:{api_token.id}` 或 `user:{user.id}`。同一字符串在不同项目、不同凭据之间互不影响:一个项目的流水线键不会重放另一个项目或另一枚 Token 的执行。
+
+**fingerprint**。请求目标字段(`case_id` / `plan_id` / `environment_id`)按排序 + 紧凑 JSON 规范化后取 SHA-256。同一 key 但 fingerprint 不同 → **409 `idempotency_key_reused`**,绝不返回与本次请求不匹配的旧 run。
+
+**状态机**。Redis value 为 JSON:
+
+| 状态 | value | TTL | 写入时机 |
+|---|---|---|---|
+| `pending` | `{"state":"pending","fingerprint","nonce"}` | 60s | 请求进入、资源校验之前 `SET NX` 抢锁 |
+| `done` | `{"state":"done","fingerprint","run_id"}` | 24h | run 提交后、任务投递前 Lua CAS(按 `nonce`) |
+
+- pending 的短 TTL 只覆盖「校验 + 建 run」窗口,进程崩溃不会永久占坑。
+- 并发同键请求在 pending 期短轮询:等到 `done` 即重放;仍无结果 → **409 `idempotency_in_progress`**,带 `Retry-After` 响应头。
+- 业务校验失败(缺环境、计划为空等)→ 释放本次持有的 pending,**不消耗 key**,修正后同一 key 可重试。
+- 重放响应为 **202** + `Idempotent-Replayed: true`,`run_id` 为首次执行。
+- 写 done 用 Lua 按 `nonce` CAS:不会覆盖后来者重新抢到的锁。
+
+**错误码**:
+
+| 状态码 | code | 场景 |
+|---|---|---|
+| 409 | `idempotency_key_reused` | 同 key 不同 fingerprint |
+| 409 | `idempotency_in_progress` | 同键首次请求仍在处理(带 `Retry-After`) |
+| 422 | `idempotency_key_invalid` | header 为空或超过 255 字符 |
+| 503 | `idempotency_unavailable` | Redis 不可用;带 key 请求 fail closed,不带 key 不受影响 |
+
+**已知限制**:幂等键依赖 Redis 持久性,Redis 清空会丢键。
 
 ### 版本化
 
@@ -265,6 +291,8 @@ audit-logs
 ```
 
 用 202 而不是 201:资源已创建但执行尚未完成。`Location` 头指向 `/api/v1/runs/{rid}`。
+
+携带 `Idempotency-Key` 时,重放请求同样返回 202,并额外带 `Idempotent-Replayed: true`;冲突与存储不可用的错误码见 §1「幂等」。
 
 **为什么不在请求里等结果**:一次计划执行可能几分钟到几十分钟,HTTP 连接扛不住。要同步等待的场景用 `callback_url`。
 
