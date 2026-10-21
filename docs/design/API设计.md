@@ -291,6 +291,27 @@ audit-logs
 
 若执行已处于终态,返回 **409**,`code: run_already_finished`。
 
+### 调度(schedules,issue #36)
+
+端点见 §3 资源清单:`GET/POST /projects/{pid}/schedules`(列表支持 `plan_id` 过滤)、`PATCH/DELETE /schedules/{sid}`、`POST /schedules/{sid}/enable|disable`。
+
+创建请求体:
+
+```json
+{
+  "name": "每晚全量",
+  "plan_id": 12,
+  "cron_expression": "0 2 * * *",
+  "timezone": "Asia/Shanghai",
+  "environment_id": null
+}
+```
+
+- **校验**:计划与环境必须归属本项目(不符一律 404,不探测);cron 仅接受标准 5 段(带秒的 6 段不支持),非法 → 422 `cron_invalid`;时区必须是合法 IANA 名称 → 422 `timezone_invalid`。
+- **重算语义(spec #35 决策 #5)**:创建/启用/修改 cron 或 timezone → 从当前时间重算 `next_run_at`;仅改名/改环境不重算;停用 → 置空;删除为软删,同时停用并清空 `next_run_at`。
+- **`next_run_at` 持久化存 UTC**,按调度自己的时区解释 cron;列表/详情返回该字段,前端直接展示。
+- 定时执行产生的 run `trigger_mode = schedule`、`triggered_by` 为空、`schedule_id` 指回调度(调度删除后保留,历史可追溯);派发语义(tick、重叠跳过、misfire)见功能模块 §2 与数据模型 §10。
+
 ## 5. 实时进度(SSE)
 
 ### `GET /runs/{rid}/events`

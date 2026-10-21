@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 
 import { api } from '@/api/client'
+import SchedulePanel from '@/components/SchedulePanel.vue'
 import { usePlanStore } from '@/stores/plan'
 import { useProjectStore } from '@/stores/project'
 import { useRunStore } from '@/stores/run'
@@ -290,6 +291,8 @@ onMounted(async () => {
         </el-form-item>
       </el-form>
     </el-card>
+
+    <SchedulePanel v-if="currentId !== null" :project-id="currentId" :plan-id="planId" />
 
     <el-card header="最近执行" class="recent-card">
       <el-empty v-if="recentRuns.length === 0" description="还没有执行记录" :image-size="60" />

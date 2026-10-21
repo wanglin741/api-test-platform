@@ -54,10 +54,12 @@ function mockGets({
   items = [ITEM_LOGIN] as object[],
   plan = PLAN as object,
   runs = { items: [], next_cursor: null } as object,
+  schedules = [] as object[],
 } = {}) {
   get.mockImplementation(async (path: unknown) => {
     const url = String(path)
     if (url.includes('/items')) return okResponse(items)
+    if (url.includes('/schedules')) return okResponse(schedules)
     if (url.includes('/environments')) return okResponse([ENV_DEV])
     if (url.includes('/cases')) return okResponse({ items: [CASE_LOGIN, CASE_ORDER], total: 2 })
     if (url.includes('/runs')) return okResponse(runs)

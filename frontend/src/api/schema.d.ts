@@ -310,6 +310,76 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/projects/{project_id}/schedules': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /** List Schedules */
+    get: operations['list_schedules_api_v1_projects__project_id__schedules_get']
+    put?: never
+    /** Create Schedule */
+    post: operations['create_schedule_api_v1_projects__project_id__schedules_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/schedules/{schedule_id}': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    post?: never
+    /** Delete Schedule */
+    delete: operations['delete_schedule_api_v1_schedules__schedule_id__delete']
+    options?: never
+    head?: never
+    /** Update Schedule */
+    patch: operations['update_schedule_api_v1_schedules__schedule_id__patch']
+    trace?: never
+  }
+  '/api/v1/schedules/{schedule_id}/enable': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Enable Schedule */
+    post: operations['enable_schedule_api_v1_schedules__schedule_id__enable_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
+  '/api/v1/schedules/{schedule_id}/disable': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    get?: never
+    put?: never
+    /** Disable Schedule */
+    post: operations['disable_schedule_api_v1_schedules__schedule_id__disable_post']
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/projects/{project_id}/environments': {
     parameters: {
       query?: never
@@ -944,6 +1014,69 @@ export interface components {
       run_id: string
       /** Status */
       status: string
+    }
+    /** ScheduleCreate */
+    ScheduleCreate: {
+      /** Name */
+      name: string
+      /** Plan Id */
+      plan_id: number
+      /** Cron Expression */
+      cron_expression: string
+      /** Timezone */
+      timezone: string
+      /** Environment Id */
+      environment_id?: number | null
+    }
+    /** ScheduleOut */
+    ScheduleOut: {
+      /** Id */
+      id: number
+      /** Project Id */
+      project_id: number
+      /** Name */
+      name: string
+      /** Plan Id */
+      plan_id: number
+      /** Cron Expression */
+      cron_expression: string
+      /** Timezone */
+      timezone: string
+      /** Enabled */
+      enabled: boolean
+      /** Environment Id */
+      environment_id: number | null
+      /** Next Run At */
+      next_run_at: string | null
+      /** Last Run At */
+      last_run_at: string | null
+      /** Last Run Id */
+      last_run_id: string | null
+      /** Last Skip At */
+      last_skip_at: string | null
+      /** Last Skip Reason */
+      last_skip_reason: string | null
+      /**
+       * Created At
+       * Format: date-time
+       */
+      created_at: string
+      /**
+       * Updated At
+       * Format: date-time
+       */
+      updated_at: string
+    }
+    /** ScheduleUpdate */
+    ScheduleUpdate: {
+      /** Name */
+      name?: string | null
+      /** Cron Expression */
+      cron_expression?: string | null
+      /** Timezone */
+      timezone?: string | null
+      /** Environment Id */
+      environment_id?: number | null
     }
     /**
      * StepDebugOut
@@ -2008,6 +2141,200 @@ export interface operations {
         }
         content: {
           'text/event-stream': unknown
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  list_schedules_api_v1_projects__project_id__schedules_get: {
+    parameters: {
+      query?: {
+        plan_id?: number | null
+      }
+      header?: never
+      path: {
+        project_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScheduleOut'][]
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  create_schedule_api_v1_projects__project_id__schedules_post: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        project_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ScheduleCreate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      201: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScheduleOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  delete_schedule_api_v1_schedules__schedule_id__delete: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        schedule_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      204: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  update_schedule_api_v1_schedules__schedule_id__patch: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        schedule_id: number
+      }
+      cookie?: never
+    }
+    requestBody: {
+      content: {
+        'application/json': components['schemas']['ScheduleUpdate']
+      }
+    }
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScheduleOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  enable_schedule_api_v1_schedules__schedule_id__enable_post: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        schedule_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScheduleOut']
+        }
+      }
+      /** @description Validation Error */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['HTTPValidationError']
+        }
+      }
+    }
+  }
+  disable_schedule_api_v1_schedules__schedule_id__disable_post: {
+    parameters: {
+      query?: never
+      header?: never
+      path: {
+        schedule_id: number
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description Successful Response */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/json': components['schemas']['ScheduleOut']
         }
       }
       /** @description Validation Error */
