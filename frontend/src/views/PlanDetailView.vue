@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import draggable from 'vuedraggable'
 
 import { api } from '@/api/client'
+import { passRateText } from '@/lib/format'
 import { usePlanStore } from '@/stores/plan'
 import { useProjectStore } from '@/stores/project'
 import { useRunStore } from '@/stores/run'
@@ -59,42 +60,27 @@ async function loadAll() {
         concurrency: plan.concurrency,
         stop_on_fail: plan.stop_on_fail,
       }
+      // 最近执行不阻塞整页渲染(次要数据,卡片自带空态);归属用计划
+      // 自己的 project_id,不信全局选中项 —— 直链/刷新时两者可能不一致
+      void runStore.listRuns(plan.project_id, api, null, RECENT_RUNS, planId.value)
     }
-    await loadRecentRuns()
   } finally {
     loading.value = false
   }
 }
 
 // ── 最近执行(#33):plan_id 筛选的报告列表,点击进入报告详情 ──
-interface RunRow {
-  run_id: string
-  status: string
-  created_at: string
-  duration_ms: number | null
-  summary: { total?: number; passed?: number } | null
-}
-const recentRuns = ref<RunRow[]>([])
-
-async function loadRecentRuns() {
-  const { data } = await api.GET('/api/v1/projects/{project_id}/runs', {
-    params: {
-      path: { project_id: currentId.value ?? 0 },
-      query: { limit: 5, plan_id: planId.value },
-    },
-  })
-  recentRuns.value = (data?.items ?? []) as RunRow[]
-}
+// 复用 runStore.listRuns(代际守卫防切计划时旧响应覆盖),不另拉一份
+const RECENT_RUNS = 5
+const runStore = useRunStore()
+const { runItems: recentRuns } = storeToRefs(runStore)
 
 function openRun(runId: string) {
   void router.push(`/runs/${runId}`)
 }
 
-function passRate(run: RunRow): string {
-  // 键名与 engine_tasks 落库一致(total),对齐报告列表页
-  if (!run.summary || typeof run.summary.total !== 'number') return '-'
-  const passed = typeof run.summary.passed === 'number' ? run.summary.passed : 0
-  return `${passed}/${run.summary.total}`
+function passRate(run: (typeof recentRuns.value)[number]): string {
+  return passRateText(run.summary)
 }
 
 onMounted(loadAll)
@@ -133,7 +119,6 @@ async function removePlan() {
 }
 
 // ── 触发动线(前端设计 §6.4):弹窗选环境(默认计划配置),成功跳报告 ──
-const runStore = useRunStore()
 const triggerDialog = ref(false)
 const triggerEnvId = ref<number | null>(null)
 const triggering = ref(false)
@@ -293,7 +278,12 @@ onMounted(async () => {
 
     <el-card header="最近执行" class="recent-card">
       <el-empty v-if="recentRuns.length === 0" description="还没有执行记录" :image-size="60" />
-      <div v-for="run in recentRuns" :key="run.run_id" class="recent-row" @click="openRun(run.run_id)">
+      <div
+        v-for="run in recentRuns"
+        :key="run.run_id"
+        class="recent-row"
+        @click="openRun(run.run_id)"
+      >
         <span class="run-id">{{ run.run_id }}</span>
         <span class="status">{{ run.status }}</span>
         <span>{{ passRate(run) }}</span>

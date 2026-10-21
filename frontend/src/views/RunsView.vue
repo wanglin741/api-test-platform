@@ -8,10 +8,11 @@ import '@/assets/list-page.css'
 import { api } from '@/api/client'
 import { useTriggerDialog } from '@/composables/trigger-dialog'
 import TriggerDialog from '@/components/TriggerDialog.vue'
+import { passRateText } from '@/lib/format'
 import { useEnvironmentStore } from '@/stores/environment'
 import { usePlanStore } from '@/stores/plan'
 import { useProjectStore } from '@/stores/project'
-import { useRunStore } from '@/stores/run'
+import { PAGE_SIZE, useRunStore } from '@/stores/run'
 
 const router = useRouter()
 const projectStore = useProjectStore()
@@ -26,23 +27,28 @@ const { items: plans } = storeToRefs(planStore)
 // ── 按计划筛选(#33):与计划详情「最近执行」共用 plan_id 查询参数 ──
 const filterPlanId = ref<number | null>(null)
 
+// 复位标记:切项目时程序性清空筛选不应触发下面的 watcher 重复拉列表
+let resettingFilter = false
+
 watch(
   currentId,
   async (projectId) => {
     if (projectId === null) return
+    resettingFilter = filterPlanId.value !== null
     filterPlanId.value = null // 切项目后旧计划的筛选失去意义,一并复位
     await Promise.all([
       runStore.listRuns(projectId, api),
       environmentStore.load(projectId, api),
       planStore.load(projectId, api),
     ])
+    resettingFilter = false
   },
   { immediate: true },
 )
 
 watch(filterPlanId, (planId) => {
-  if (currentId.value === null) return
-  void runStore.listRuns(currentId.value, api, null, 20, planId)
+  if (resettingFilter || currentId.value === null) return
+  void runStore.listRuns(currentId.value, api, null, PAGE_SIZE, planId)
 })
 
 function envName(environmentId: number): string {
@@ -50,11 +56,7 @@ function envName(environmentId: number): string {
 }
 
 function passRate(item: (typeof runItems.value)[number]): string {
-  const summary = item.summary
-  // 键名与 engine_tasks 落库一致(total,非 total_steps),对齐报告详情页统计卡
-  if (!summary || typeof summary.total !== 'number') return '-'
-  const passed = typeof summary.passed === 'number' ? summary.passed : 0
-  return `${passed}/${summary.total}`
+  return passRateText(item.summary)
 }
 
 function openRun(runId: string) {
@@ -63,7 +65,8 @@ function openRun(runId: string) {
 
 async function nextPage() {
   if (currentId.value === null || nextCursor.value === null) return
-  await runStore.listRuns(currentId.value, api, nextCursor.value)
+  // 翻页沿用当前筛选:丢了 plan_id 会把筛选列表悄悄换成全量列表
+  await runStore.listRuns(currentId.value, api, nextCursor.value, PAGE_SIZE, filterPlanId.value)
 }
 
 // ── 再次执行:复用执行弹窗,带原 run 的用例与环境 ─────────────────
@@ -86,12 +89,7 @@ const rerunEnvId = computed(() => rerunTarget.value?.environmentId ?? null)
   </div>
   <div v-else class="page" v-loading="listLoading">
     <div class="filter-bar">
-      <el-select
-        v-model="filterPlanId"
-        clearable
-        placeholder="按计划筛选"
-        class="plan-filter"
-      >
+      <el-select v-model="filterPlanId" clearable placeholder="按计划筛选" class="plan-filter">
         <el-option v-for="plan in plans" :key="plan.id" :label="plan.name" :value="plan.id" />
       </el-select>
     </div>
