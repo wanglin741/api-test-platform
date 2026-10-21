@@ -2,10 +2,12 @@
 
 from fastapi import APIRouter
 
-from app.api.v1 import cases, environments, folders, plans, projects, runs, schedules, variables
+from app.api.v1 import api_tokens, cases, environments, folders, plans, projects, runs, schedules, variables
 
 api_router = APIRouter()
 api_router.include_router(projects.router)
+api_router.include_router(api_tokens.project_router)
+api_router.include_router(api_tokens.router)
 api_router.include_router(folders.project_router)
 api_router.include_router(folders.router)
 api_router.include_router(plans.project_router)

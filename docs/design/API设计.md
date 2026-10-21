@@ -6,18 +6,23 @@
 
 ### 认证
 
-两种凭据,共用 `Authorization: Bearer <token>` 头,按**格式**区分:
+MVP 阶段两种凭据,共用 `Authorization: Bearer <token>` 头,按**格式**区分:
 
 | 用途 | 凭据 | 格式 | 生命周期 |
 |---|---|---|---|
-| 浏览器 | JWT | 三段点分,`eyJ...` | access 30 分钟,refresh 14 天 |
+| 浏览器 | 种子用户 | 不带 `Authorization` | 免认证(MVP 取舍,见前端设计 §1) |
 | CI / 脚本 | API Token | 不透明串,前缀 `at_` | 可设过期时间,可撤销 |
 
-用一个头而不是两个,是为了让 CI 脚本和浏览器客户端共用同一套客户端代码。服务端的依赖注入按前缀分派到不同的校验器。
+用一个头而不是两个,是为了让 CI 脚本和浏览器客户端共用同一套客户端代码。服务端的依赖注入按前缀分派到不同的校验器(`app/api/deps.py` 的 `resolve_principal`,认证的唯一改动点;SSE 端点复用同一函数,不因流式响应破例):
 
-**API Token 只存哈希**。创建时明文返回一次,之后无法再取。平台自身存明文 token 是严重问题 —— 这个 token 能触发测试执行。
+- 无 `Authorization`(或非 `at_` 前缀的凭据)→ 回退种子用户,既有前端免认证动线不变。
+- `Bearer at_...` → 按 SHA-256 哈希查 `api_token`、校验未过期且未软删,刷新 `last_used_at`;未知/过期/已撤销 → **401 `invalid_token`**。
+- Token 的项目边界:与目标项目不符 → **403 `token_project_mismatch`**;scope 不足 → **403 `insufficient_scope`**。
+- Token 仅接受 run 相关端点(触发 `run:trigger`;读 run/步骤/SSE 与 JUnit 导出 `report:read`)。携带 Token 访问其余端点(项目、用例、计划、调度、Token 管理等)一律 **403 `token_not_allowed`**,不暴露未完成的权限体系。
 
-**API Token 以某个用户的身份运行**。`api_token.user_id` 决定权限边界,不引入独立的「机器人账号」概念。这让权限模型保持单一。
+**API Token 只存哈希**。明文仅在创建响应返回一次,之后无法再取。平台自身存明文 token 是严重问题 —— 这个 token 能触发测试执行。默认 scopes 为 `["run:trigger","report:read"]`;撤销 = 软删(`deleted_at`),下一次请求立即失效。
+
+**API Token 以某个用户的身份运行**。`api_token.user_id` 决定权限边界,不引入独立的「机器人账号」概念。这让权限模型保持单一。Token 触发的 run 不归属到个人:`triggered_by` 为空,归因通过 `api_token` 的 `last_used_at`。
 
 ### 分页
 
@@ -243,12 +248,13 @@ audit-logs
   "environment_id": 5,
   "case_version": null,
   "parameters_override": { "username": ["alice"] },
-  "callback_url": "https://ci.example.com/hooks/test-done",
-  "trigger_mode": "ci"
+  "callback_url": "https://ci.example.com/hooks/test-done"
 }
 ```
 
 `plan_id` 与 `case_id` 二选一(单用例调试执行走 `/cases/{cid}/debug`,但 CI 场景下用同一个端点更方便)。两者同给或同缺 → 422 `run_target_invalid`。
+
+**请求体不接受 `trigger_mode`**(spec #35 决策 #1)。触发来源由服务端按凭据判定,避免自报伪造:无 Bearer → `manual`,`triggered_by` 为种子用户;API Token → `ci`,`triggered_by` 为空;调度 tick → `schedule`。请求体若携带 `trigger_mode` 字段会被忽略。Token 触发需 `run:trigger` scope。
 
 计划触发时:`environment_id` 覆盖计划的默认环境,两者都缺 → 422 `environment_required`;清单为空 → 422 `plan_items_empty`。单用例触发必须带 `environment_id`。
 

@@ -28,6 +28,8 @@ class RunOut(BaseModel):
     plan_id: int | None = None
     environment_id: int
     trigger_mode: str
+    # 定时/CI 触发为空(归因走 schedule / api_token),手动触发为种子用户
+    triggered_by: int | None = None
     status: str
     duration_ms: int | None = None
     summary: dict[str, Any] | None = None

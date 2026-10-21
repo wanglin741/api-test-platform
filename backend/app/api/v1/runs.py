@@ -12,7 +12,15 @@ from fastapi.sse import EventSourceResponse, ServerSentEvent
 from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.deps import get_current_user, get_db, load_current_user
+from app.api.deps import (
+    Principal,
+    get_current_user,
+    get_db,
+    get_principal,
+    require_token_project,
+    require_token_scope,
+    resolve_principal,
+)
 from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
@@ -55,6 +63,7 @@ def _run_out(run: Run) -> RunOut:
         plan_id=run.plan_id,
         environment_id=run.environment_id,
         trigger_mode=run.trigger_mode,
+        triggered_by=run.triggered_by,
         status=run.status,
         duration_ms=run.duration_ms,
         summary=run.summary,
@@ -86,9 +95,18 @@ async def trigger_run(
     payload: RunCreate,
     response: Response,
     session: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_principal),
 ) -> RunTriggered:
     await get_project_or_404(session, project_id)
+    require_token_scope(principal, "run:trigger")
+    require_token_project(principal, project_id)
+
+    # trigger_mode 服务端判定,请求体不自报(spec 决策 #1):无 Bearer →
+    # manual;API Token → ci 且 triggered_by 为空(归因走 api_token)
+    if principal.token is not None:
+        trigger_mode, triggered_by = "ci", None
+    else:
+        trigger_mode, triggered_by = "manual", principal.user.id
 
     if (payload.case_id is None) == (payload.plan_id is None):
         raise ValidationFailedError(
@@ -116,8 +134,8 @@ async def trigger_run(
             case_id=case.id,
             case_version=case.current_version,  # 锁定版本:改用例不影响旧报告还原
             environment_id=environment.id,
-            trigger_mode="manual",
-            triggered_by=user.id,
+            trigger_mode=trigger_mode,
+            triggered_by=triggered_by,
             status="pending",
         )
     # ── 计划触发 ───────────────────────────────────────────────────
@@ -130,8 +148,8 @@ async def trigger_run(
                 project_id=project_id,
                 plan_id=payload.plan_id,
                 environment_id=payload.environment_id,
-                trigger_mode="manual",
-                triggered_by=user.id,
+                trigger_mode=trigger_mode,
+                triggered_by=triggered_by,
             )
         )
 
@@ -167,9 +185,11 @@ async def list_project_runs(
     cursor: str | None = Query(default=None),
     plan_id: int | None = Query(default=None),
     session: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_principal),
 ) -> RunPage:
     await get_project_or_404(session, project_id)
+    require_token_scope(principal, "report:read")
+    require_token_project(principal, project_id)
     stmt = select(Run).where(Run.project_id == project_id)
     if plan_id is not None:
         # 报告列表按计划筛选(计划外键索引):计划详情页「最近执行」与
@@ -194,9 +214,11 @@ async def list_project_runs(
 async def get_run(
     run_id: uuid.UUID,
     session: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_principal),
 ) -> RunOut:
     run = await _get_run_or_404(session, run_id)
+    require_token_scope(principal, "report:read")
+    require_token_project(principal, run.project_id)
     return _run_out(run)
 
 
@@ -289,9 +311,11 @@ async def _load_step_items(
 async def list_run_steps(
     run_id: uuid.UUID,
     session: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_principal),
 ) -> StepList:
-    await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
+    run = await _get_run_or_404(session, run_id)  # run 不存在与无步骤区分开
+    require_token_scope(principal, "report:read")
+    require_token_project(principal, run.project_id)
     items, truncated = await _load_step_items(session, run_id)
     return StepList(items=items, count=len(items), truncated=truncated)
 
@@ -332,15 +356,21 @@ async def _ensure_run_stream_access(
     SSE 端点不能用 yield 依赖(get_db / get_current_user):其清理在流
     结束后才跑,会把数据库连接占住整个 SSE 生命周期。非 yield 依赖在
     响应开始前运行,认证失败 / 404 / 非法过滤值都在流开始前返回 ——
-    生成器体里的异常无法变成 400。认证查询经 deps.load_current_user
-    与 get_current_user 同源(认证唯一改动点不因本端点破例)。
+    生成器体里的异常无法变成 400。认证经 deps.resolve_principal 与
+    普通端点同源(认证唯一改动点不因本端点破例):Token 需要
+    report:read 且 run 归属 Token 项目,无 Bearer 维持种子用户放行。
     返回过滤白名单。
     """
     allowed = _resolve_event_filter(events)
     factory: async_sessionmaker[AsyncSession] = request.app.state.session_factory
     async with factory() as session:
-        await load_current_user(session)
-        await _get_run_or_404(session, run_id)
+        principal = await resolve_principal(session, request)
+        run = await _get_run_or_404(session, run_id)
+        require_token_scope(principal, "report:read")
+        require_token_project(principal, run.project_id)
+        if principal.token is not None:
+            # 短会话不自动提交:last_used_at 的刷新要在这里落库
+            await session.commit()
     return allowed
 
 

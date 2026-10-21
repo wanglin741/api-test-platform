@@ -30,6 +30,7 @@ def test_migration_replay(database: None) -> None:
             "run",
             "run_step_result",
             "schedule",
+            "api_token",
             "alembic_version",
         } <= tables
         # 重放后种子用户必须存在(get_current_user 依赖它)

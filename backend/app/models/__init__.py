@@ -1,5 +1,6 @@
 """ORM 模型汇总,方便 Alembic 的 target_metadata 与全量 import。"""
 
+from app.models.api_token import ApiToken
 from app.models.base import Base
 from app.models.environment import Environment
 from app.models.folder import Folder
@@ -12,6 +13,7 @@ from app.models.user import User
 from app.models.variable import Variable
 
 __all__ = [
+    "ApiToken",
     "Base",
     "Environment",
     "Folder",
