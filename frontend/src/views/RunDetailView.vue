@@ -174,8 +174,8 @@ function groupAssertion(steps: StepOut[]): string {
     <div class="meta-line">
       <template v-if="runStore.run.plan_id != null">计划 #{{ runStore.run.plan_id }}</template>
       <template v-else>用例 #{{ runStore.run.case_id }}(v{{ runStore.run.case_version }})</template>
-      · 环境 #{{ runStore.run.environment_id }}
-      · {{ runStore.run.trigger_mode }} · {{ runStore.run.created_at }}
+      · 环境 #{{ runStore.run.environment_id }} · {{ runStore.run.trigger_mode }} ·
+      {{ runStore.run.created_at }}
     </div>
 
     <el-alert

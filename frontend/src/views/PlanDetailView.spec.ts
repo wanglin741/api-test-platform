@@ -23,7 +23,10 @@ vi.mock('vue-router', () => ({
 
 vi.mock('@/api/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/api/client')>()
-  return { ...actual, api: { GET: get, PATCH: patch, PUT: put, POST: post } as unknown as ApiClient }
+  return {
+    ...actual,
+    api: { GET: get, PATCH: patch, PUT: put, POST: post } as unknown as ApiClient,
+  }
 })
 
 function okResponse(body: unknown) {
@@ -164,6 +167,25 @@ describe('PlanDetailView', () => {
 
     await rows[0]!.trigger('click')
     expect(push).toHaveBeenCalledWith('/runs/r-9')
+  })
+
+  it('最近执行按计划自己的 project_id 拉取,不信全局选中项目(#33 review)', async () => {
+    mockGets({
+      runs: { items: [], next_cursor: null },
+    })
+    // 全局选中的是项目 2,但计划属于项目 1(直链/刷新时两者可能不一致)
+    setActivePinia(createPinia())
+    useProjectStore().currentId = 2
+    const wrapper = mount(PlanDetailView, { global: { plugins: [ElementPlus] } })
+    await flushPromises()
+
+    const runsCall = get.mock.calls.find((call) => String(call[0]).includes('/runs')) as [
+      string,
+      { params: { path: { project_id: number }; query: Record<string, unknown> } },
+    ]
+    expect(runsCall[1].params.path.project_id).toBe(1)
+    expect(runsCall[1].params.query.plan_id).toBe(1)
+    expect(wrapper.findAll('.recent-row')).toHaveLength(0)
   })
 })
 
