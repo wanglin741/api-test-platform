@@ -17,7 +17,8 @@ from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
 from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
-from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, TestPlan, TestPlanItem, User
+from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
+from app.run_builder import build_plan_run
 from app.run_events import finished_payload, stream_key
 from app.schemas.runs import (
     CancelAck,
@@ -121,34 +122,17 @@ async def trigger_run(
         )
     # ── 计划触发 ───────────────────────────────────────────────────
     else:
-        plan = await session.get(TestPlan, payload.plan_id)
-        if plan is None or plan.deleted_at is not None or plan.project_id != project_id:
-            raise not_found("plan", payload.plan_id)
-        item_count = await session.scalar(
-            select(func.count()).select_from(TestPlanItem).where(TestPlanItem.plan_id == plan.id)
-        )
-        if not item_count:
-            raise ValidationFailedError(
-                "计划没有用例,先在计划详情里编排清单",
-                code="plan_items_empty",
-                details={"plan_id": plan.id},
+        # 计划归属、清单非空、环境解析与 tick 共用同一构造器(spec #35:
+        # 两种触发来源语义只写一遍);AppError 直接映射为既有 4xx 响应
+        run = await session.run_sync(
+            lambda s: build_plan_run(
+                s,
+                project_id=project_id,
+                plan_id=payload.plan_id,
+                environment_id=payload.environment_id,
+                trigger_mode="manual",
+                triggered_by=user.id,
             )
-        # 请求体的 environment_id 覆盖计划默认(数据模型 §8「运行时指定则覆盖」)
-        environment_id = payload.environment_id or plan.environment_id
-        if environment_id is None:
-            raise ValidationFailedError(
-                "计划未配置默认环境,触发时必须指定 environment_id",
-                code="environment_required",
-                details={"plan_id": plan.id},
-            )
-        environment = await _validate_environment(session, project_id, environment_id)
-        run = Run(
-            project_id=project_id,
-            plan_id=plan.id,
-            environment_id=environment.id,
-            trigger_mode="manual",
-            triggered_by=user.id,
-            status="pending",
         )
 
     session.add(run)

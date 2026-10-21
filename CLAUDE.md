@@ -26,10 +26,13 @@ Design docs are updated **in the same change** as the code they describe.
 cd backend
 uv run uvicorn app.main:app --port 8000   # API server (needs compose services up)
 uv run celery -A app.tasks.celery_app worker -Q execution,default -P solo  # worker
+uv run celery -A app.tasks.celery_app beat  # scheduler tick (每分钟);MUST be single-instance
 uv run alembic upgrade head             # apply migrations (PYTHONUTF8=1 on Windows)
 uv run python scripts/seed.py           # reset business tables to the demo dataset
 uv sync                                 # install/refresh dependencies into backend/.venv
 ```
+
+**beat 单实例硬约束**:beat 触发每分钟的调度 tick(#37),多实例会重复派发;`FOR UPDATE SKIP LOCKED` 只是误配兜底。不要为扩容起第二个 beat。
 
 `uv run` and `uv sync` create `backend/.venv` on first use (gitignored). **Run uv from `backend/`** — from the repo root it finds no `pyproject.toml` and falls back to an ephemeral environment instead of the project's.
 
