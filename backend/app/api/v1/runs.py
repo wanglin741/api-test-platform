@@ -29,7 +29,16 @@ from app.api.v1.common import get_project_or_404
 from app.core.config import get_settings
 from app.core.errors import AppError, ConflictError, ValidationFailedError, not_found
 from app.event_names import FINISHED_FILTER_EVENTS, RUN_FINISHED, RUN_SNAPSHOT, TERMINAL_EVENT
-from app.models import Environment, Run, RUN_TERMINAL_STATUSES, RunStepResult, TestCase, User
+from app.junit_export import CaseResult, StepSummary, render_junit
+from app.models import (
+    Environment,
+    Run,
+    RUN_TERMINAL_STATUSES,
+    RunStepResult,
+    TestCase,
+    TestPlan,
+    User,
+)
 from app.quality_gate import evaluate_quality_gate
 from app.run_builder import build_plan_run
 from app.run_events import finished_payload, stream_key
@@ -437,6 +446,154 @@ async def list_run_steps(
     require_token_project(principal, run.project_id)
     items, truncated = await _load_step_items(session, run_id)
     return StepList(items=items, count=len(items), truncated=truncated)
+
+
+def _group_step_summaries(rows) -> dict[int, list[StepSummary]]:
+    """轻量步骤行按 case_index 分组;system-out 只要摘要,不碰请求响应体。"""
+    grouped: dict[int, list[StepSummary]] = {}
+    for row in rows:
+        grouped.setdefault(row.case_index, []).append(
+            StepSummary(
+                name=row.step_name,
+                status=row.status,
+                duration_ms=row.duration_ms,
+                assertion_total=row.assertion_total,
+                assertion_passed=row.assertion_passed,
+            )
+        )
+    return grouped
+
+
+@router.get(
+    "/{run_id}/export",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/xml": {}},
+            "description": "JUnit XML 报告(附件 run-{id}.xml)",
+        },
+        409: {"description": "执行尚未结束(run_not_finished)"},
+        422: {"description": "导出格式不支持(export_format_invalid)"},
+    },
+)
+async def export_run(
+    run_id: uuid.UUID,
+    export_format: str | None = Query(
+        default=None, alias="format", description="导出格式,仅支持 junit"
+    ),
+    session: AsyncSession = Depends(get_db),
+    principal: Principal = Depends(get_principal),
+) -> Response:
+    """导出 JUnit XML(spec #35 决策 #8 / API设计 §7 导出)。
+
+    权限与报告读取同源:report:read + Token 项目边界;非终态不导出半成品。
+    名称按当前库中未删除的计划/用例解析,已删回退 `plan #id` / `用例 #id`。
+    """
+    run = await _get_run_or_404(session, run_id)
+    require_token_scope(principal, "report:read")
+    require_token_project(principal, run.project_id)
+
+    if export_format != "junit":
+        raise ValidationFailedError(
+            "导出格式仅支持 junit",
+            code="export_format_invalid",
+            details={"format": export_format},
+        )
+    if run.status not in RUN_TERMINAL_STATUSES:
+        raise ConflictError(
+            "执行尚未结束,暂不能导出",
+            code="run_not_finished",
+            details={"run_id": str(run.id), "status": run.status},
+        )
+
+    # 显式列清单:system-out 只要步骤摘要,不读 response_body 等大字段
+    rows = (
+        await session.execute(
+            select(
+                RunStepResult.case_index,
+                RunStepResult.step_name,
+                RunStepResult.status,
+                RunStepResult.duration_ms,
+                RunStepResult.assertion_total,
+                RunStepResult.assertion_passed,
+            )
+            .where(RunStepResult.run_id == run.id)
+            .order_by(RunStepResult.case_index, RunStepResult.step_index)
+        )
+    ).all()
+    steps_by_case = _group_step_summaries(rows)
+
+    summary = run.summary or {}
+    if run.plan_id is not None:
+        # 计划 run:summary.cases 每条一个 testcase,classname = 计划名
+        suite_name = (
+            await session.scalar(
+                select(TestPlan.name).where(
+                    TestPlan.id == run.plan_id, TestPlan.deleted_at.is_(None)
+                )
+            )
+        ) or f"plan #{run.plan_id}"
+        entries = summary.get("cases") or []
+        case_ids = [e.get("case_id") for e in entries if e.get("case_id") is not None]
+        names: dict[int, str] = {}
+        if case_ids:
+            names = dict(
+                (
+                    await session.execute(
+                        select(TestCase.id, TestCase.name).where(
+                            TestCase.id.in_(case_ids), TestCase.deleted_at.is_(None)
+                        )
+                    )
+                ).all()
+            )
+        cases = []
+        for entry in entries:
+            case_index = entry.get("case_index", 0)
+            case_id = entry.get("case_id")
+            case_steps = steps_by_case.get(case_index, [])
+            cases.append(
+                CaseResult(
+                    classname=suite_name,
+                    name=names.get(case_id) or f"用例 #{case_id}",
+                    status=entry.get("status", run.status),
+                    # 用例耗时 = 该用例步骤耗时之和(不是 run 时长)
+                    time_ms=sum(step.duration_ms for step in case_steps),
+                    steps=tuple(case_steps),
+                )
+            )
+    else:
+        # 单用例 run:一个 testcase,time 用 run 时长
+        suite_name = (
+            await session.scalar(
+                select(TestCase.name).where(
+                    TestCase.id == run.case_id, TestCase.deleted_at.is_(None)
+                )
+            )
+            if run.case_id is not None
+            else None
+        ) or f"用例 #{run.case_id}"
+        cases = [
+            CaseResult(
+                classname=suite_name,
+                name=suite_name,
+                status=run.status,
+                time_ms=run.duration_ms or 0,
+                steps=tuple(steps_by_case.get(0, [])),
+            )
+        ]
+
+    xml = render_junit(
+        suite_name=suite_name,
+        cases=cases,
+        timestamp=run.finished_at or run.started_at or run.created_at,
+        # 键不存在 = 未配置门禁;不写 properties(spec 决策 #9)
+        gate_passed=summary["gate_passed"] if "gate_passed" in summary else None,
+    )
+    return Response(
+        content=xml,
+        media_type="application/xml; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="run-{run.id}.xml"'},
+    )
 
 
 @router.post("/{run_id}/cancel", response_model=CancelAck)

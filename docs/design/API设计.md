@@ -230,7 +230,7 @@ runs
   POST   /runs/{rid}/cancel
   POST   /runs/{rid}/rerun
   POST   /runs/{rid}/share                 生成分享链接
-  GET    /runs/{rid}/export?format=junit   JUnit XML / HTML
+  GET    /runs/{rid}/export?format=junit   JUnit XML
 
 schedules
   GET    /projects/{pid}/schedules
@@ -453,10 +453,43 @@ folder_id: 3
 
 ```
 GET /projects/{pid}/api-definitions/export?format=openapi
-GET /runs/{rid}/export?format=junit|html
+GET /runs/{rid}/export?format=junit
 ```
 
 JUnit XML 是 CI 集成的通用格式 —— Jenkins、GitLab CI、GitHub Actions 都能直接消费。**这是 CI 集成里比 `callback_url` 更通用的路径**:很多 CI 系统只需要一个能解析的测试报告文件。
+
+**仅支持 `format=junit`**(本阶段不做 HTML 导出)。端点为终态 run 的同步导出:
+
+| 场景 | 状态码 | code |
+|---|---|---|
+| `format` 缺失或非 `junit` | 422 | `export_format_invalid` |
+| run 不存在 | 404 | `run_not_found` |
+| run 尚未终态(`pending` / `running` / `stopping`) | 409 | `run_not_finished` |
+| Token 缺少 `report:read` | 403 | `insufficient_scope` |
+| Token 跨项目 | 403 | `token_project_mismatch` |
+
+**权限与读报告同源**:`report:read` + Token 项目边界。导出只查轻量列(步骤名称/状态/耗时/断言统计),**不读取响应体等大字段**。
+
+**响应头**:
+
+```
+Content-Type: application/xml; charset=utf-8
+Content-Disposition: attachment; filename="run-{rid}.xml"
+```
+
+**JUnit 映射规范**(spec #35 决策 #8):
+
+| 层级 | 规则 |
+|---|---|
+| 根节点 | 一个 run 一个 `<testsuites>`,内含一个 `<testsuite>` |
+| `<testsuite>` | `name` = 计划名(单用例 run 为用例名);`tests` / `failures` / `errors` / `skipped` / `time`(秒,3 位小数)/ `timestamp`(ISO 8601) |
+| `<testcase>` | 计划 run:按 `summary.cases` 每条一个,`classname` = 计划名、`name` = 用例名、`time` = 该用例步骤耗时之和;单用例 run:一个 testcase,`time` = run 时长 |
+| 名称回退 | 计划/用例已软删 → `plan #{plan_id}` / `用例 #{case_id}` |
+| 状态 | `success` 无子节点;`failed` → `<failure>`;`error` → `<error>`;`skipped` / `stopped` → `<skipped>`(套件计数计入 skipped) |
+| `<system-out>` | 该用例步骤摘要(名称/状态/耗时/断言通过数),最多 500 行;**不含请求/响应体** |
+| 门禁 | `summary.gate_passed` 键存在时输出 `<properties><property name="gate_passed" value="true\|false"/></properties>`;未配置门禁不写该节点 |
+
+退出码语义见《功能模块》§3.3:`status ∈ (failed, error, stopped)` 或 `summary.gate_passed === false` 都算失败。
 
 ## 8. 限流
 

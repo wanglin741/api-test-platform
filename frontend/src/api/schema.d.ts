@@ -295,6 +295,29 @@ export interface paths {
     patch?: never
     trace?: never
   }
+  '/api/v1/runs/{run_id}/export': {
+    parameters: {
+      query?: never
+      header?: never
+      path?: never
+      cookie?: never
+    }
+    /**
+     * Export Run
+     * @description 导出 JUnit XML(spec #35 决策 #8 / API设计 §7 导出)。
+     *
+     *     权限与报告读取同源:report:read + Token 项目边界;非终态不导出半成品。
+     *     名称按当前库中未删除的计划/用例解析,已删回退 `plan #id` / `用例 #id`。
+     */
+    get: operations['export_run_api_v1_runs__run_id__export_get']
+    put?: never
+    post?: never
+    delete?: never
+    options?: never
+    head?: never
+    patch?: never
+    trace?: never
+  }
   '/api/v1/runs/{run_id}/cancel': {
     parameters: {
       query?: never
@@ -2290,6 +2313,45 @@ export interface operations {
         content: {
           'application/json': components['schemas']['HTTPValidationError']
         }
+      }
+    }
+  }
+  export_run_api_v1_runs__run_id__export_get: {
+    parameters: {
+      query?: {
+        /** @description 导出格式,仅支持 junit */
+        format?: string | null
+      }
+      header?: never
+      path: {
+        run_id: string
+      }
+      cookie?: never
+    }
+    requestBody?: never
+    responses: {
+      /** @description JUnit XML 报告(附件 run-{id}.xml) */
+      200: {
+        headers: {
+          [name: string]: unknown
+        }
+        content: {
+          'application/xml': unknown
+        }
+      }
+      /** @description 执行尚未结束(run_not_finished) */
+      409: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
+      }
+      /** @description 导出格式不支持(export_format_invalid) */
+      422: {
+        headers: {
+          [name: string]: unknown
+        }
+        content?: never
       }
     }
   }
