@@ -6,7 +6,7 @@ import { useRoute } from 'vue-router'
 import { api } from '@/api/client'
 import StepSnapshot from '@/components/StepSnapshot.vue'
 import { TERMINAL_STATUSES, useRunStore } from '@/stores/run'
-import { gatePassed, triggerModeLabel } from '@/utils/format'
+import { gatePassed, triggerModeLabel } from '@/lib/format'
 
 import type { components } from '@/api/schema'
 

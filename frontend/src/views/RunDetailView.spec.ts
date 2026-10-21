@@ -283,14 +283,11 @@ describe('RunDetailView 计划分组(#31)', () => {
   }
 
   it('计划报告:按用例分组,组头 = 用例名 + 状态 + 组内断言数;失败组突出', async () => {
-    mockRun(
-      PLAN_RUN,
-      {
-        items: [planStep(0, 11, '登录步骤', 'failed'), planStep(1, 12, '下单步骤', 'passed')],
-        count: 2,
-        truncated: false,
-      },
-    )
+    mockRun(PLAN_RUN, {
+      items: [planStep(0, 11, '登录步骤', 'failed'), planStep(1, 12, '下单步骤', 'passed')],
+      count: 2,
+      truncated: false,
+    })
     const wrapper = await mountView()
 
     const heads = wrapper.findAll('.case-head')
@@ -311,7 +308,10 @@ describe('RunDetailView 计划分组(#31)', () => {
   })
 
   it('计划运行中:「正在执行」文案带用例名', async () => {
-    mockRun({ ...PLAN_RUN, status: 'running', summary: null }, { items: [], count: 0, truncated: false })
+    mockRun(
+      { ...PLAN_RUN, status: 'running', summary: null },
+      { items: [], count: 0, truncated: false },
+    )
     const wrapper = await mountView()
     const { useRunStore } = await import('@/stores/run')
     const store = useRunStore()

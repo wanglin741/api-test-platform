@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 
 import { api } from '@/api/client'
-import { downloadText, junitFileName } from '@/utils/format'
+import { downloadText, junitFileName } from '@/lib/format'
 
 import type { ApiClient } from '@/api/client'
 import type { components } from '@/api/schema'
@@ -34,7 +34,7 @@ interface PlanCaseSummary {
 /** 与后端 RUN_TERMINAL_STATUSES 一致;轮询见到这些状态就停。 */
 export const TERMINAL_STATUSES = new Set(['success', 'failed', 'error', 'stopped'])
 
-const PAGE_SIZE = 20
+export const PAGE_SIZE = 20
 
 function lastEnvKey(projectId: number): string {
   return `apitest.last-env-${projectId}`
@@ -52,6 +52,10 @@ export const useRunStore = defineStore('run', () => {
   const nextCursor = ref<string | null>(null)
   const listLoading = ref(false)
 
+  // 代际守卫:列表只有一份全局状态,切项目/改筛选的快速连续请求
+  // 只让最后一次落账,迟到的旧响应作废(否则旧数据覆盖新列表、翻页游标错乱)
+  let listSeq = 0
+
   async function listRuns(
     projectId: number,
     client: ApiClient = api,
@@ -59,6 +63,7 @@ export const useRunStore = defineStore('run', () => {
     limit = PAGE_SIZE,
     planId: number | null = null,
   ): Promise<void> {
+    const seq = ++listSeq
     listLoading.value = true
     try {
       // 先清旧行:请求失败或切换项目时,不在新上下文里显示上一次的列表
@@ -70,10 +75,11 @@ export const useRunStore = defineStore('run', () => {
       const { data } = await client.GET('/api/v1/projects/{project_id}/runs', {
         params: { path: { project_id: projectId }, query },
       })
+      if (seq !== listSeq) return
       runItems.value = data?.items ?? []
       nextCursor.value = data?.next_cursor ?? null
     } finally {
-      listLoading.value = false
+      if (seq === listSeq) listLoading.value = false
     }
   }
 

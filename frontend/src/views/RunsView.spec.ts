@@ -177,10 +177,14 @@ describe('RunsView', () => {
   })
 
   it('计划筛选:选计划后按 plan_id 拉取,清除后恢复全量(#33)', async () => {
-    mockRunsList({ 1: PAGE_1 }, [ENV_DEV], [
-      { id: 12, name: '回归计划' },
-      { id: 13, name: '冒烟计划' },
-    ])
+    mockRunsList(
+      { 1: PAGE_1 },
+      [ENV_DEV],
+      [
+        { id: 12, name: '回归计划' },
+        { id: 13, name: '冒烟计划' },
+      ],
+    )
     // el-select 在 jsdom 里依赖真实布局做弹层定位,打桩后用 emit 驱动
     const wrapper = await mountWithSelectStub()
     const select = wrapper.findComponent({ name: 'ElSelectStub' })
@@ -202,5 +206,26 @@ describe('RunsView', () => {
     )
     last = runsCalls.at(-1) as [string, { params: { query: Record<string, unknown> } }]
     expect(last[1].params.query.plan_id).toBeUndefined()
+  })
+
+  it('筛选状态下翻页:游标与 plan_id 同行,不丢筛选(#33 review)', async () => {
+    mockRunsList(
+      { 1: { items: [RUN_A], next_cursor: 'cursor-2' } },
+      [ENV_DEV],
+      [{ id: 12, name: '回归计划' }],
+    )
+    const wrapper = await mountWithSelectStub()
+    wrapper.findComponent({ name: 'ElSelectStub' }).vm.$emit('update:modelValue', 12)
+    await flushPromises()
+
+    await wrapper.find('.pager .next').trigger('click')
+    await flushPromises()
+
+    const runsCalls = get.mock.calls.filter(
+      (call) => String(call[0]).includes('/runs') && !String(call[0]).includes('environments'),
+    )
+    const last = runsCalls.at(-1) as [string, { params: { query: Record<string, unknown> } }]
+    expect(last[1].params.query.cursor).toBe('cursor-2')
+    expect(last[1].params.query.plan_id).toBe(12)
   })
 })
